@@ -1,10 +1,10 @@
 # shellcheck shell=sh
 # sf-init: labels, risky paths + CLAUDE.md keys via a PR, Orca automation; a rerun writes nothing.
-# Repo acme/app. git is real (a local bare origin under $TEST_TMP); gh and orca are fakes.
+# Repo acme/app. git is real: origin is git@github.com:acme/app.git, which a fake ssh serves from
+# bare repos under $TEST_TMP/remote. gh and orca are fakes.
 
 REPO=acme/app
 LABELS_Q='.[].name'
-PR_Q='.[0].url // ""'
 PR_URL=https://github.com/acme/app/pull/9
 TITLE='chore: set up the factory (sf-init)'
 
@@ -24,13 +24,23 @@ world() {
   git init -q "$TEST_TMP/seed"
   printf '# app\n\n## shinstack\nshinstack-mode: auto\n\n## Other\nkeep me\n' > "$TEST_TMP/seed/CLAUDE.md"
   seed_commit
-  git clone -q "$ORIGIN" "$WS"
+  # Fake ssh: run the remote git command (git-upload-pack 'acme/app.git') in $TEST_TMP/remote.
+  cat > "$TEST_TMP/ssh" <<SSH
+#!/bin/sh
+for a; do cmd=\$a; done
+cd '$TEST_TMP/remote' || exit 1
+eval "\$(printf '%s\\n' "\$cmd" | sed "s|^git-\\([a-z-]*\\) '/*|git \\1 '|")"
+SSH
+  chmod +x "$TEST_TMP/ssh"
+  GIT_SSH=$TEST_TMP/ssh
+  export GIT_SSH
+  git clone -q git@github.com:acme/app.git "$WS"
   WS=$(git -C "$WS" rev-parse --show-toplevel) # as sf-init sees it (C:/... on Windows)
 
   labels ""
   for l in ready needs-shin icebox risk:high; do label_create "$l" < /dev/null; done
   echo main | fixture gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name
-  open_pr ""
+  open_pr '[]'
   echo "$PR_URL" | fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file -
   automations '[]'
   echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
@@ -51,7 +61,7 @@ label_create() {
   esac
   fixture gh label create "$1" -R "$REPO" --color "$c" --description "$d"
 }
-open_pr() { printf '%s\n' "$1" | fixture gh pr list -R "$REPO" --head factory-init --state open --json url -q "$PR_Q"; }
+open_pr() { printf '%s\n' "$1" | fixture gh pr list -R "$REPO" --head factory-init --state open --json url,isCrossRepository; }
 automations() { printf '{"ok":true,"result":{"automations":%s,"items":[]}}\n' "$1" | fixture orca automations list --json; }
 sf_init() { sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO" --workspace "$WS" "$@"; }
 remote_file() { git -C "$ORIGIN" show "$1:$2"; }
@@ -90,7 +100,7 @@ test_second_run_writes_nothing() {
 needs-shin
 icebox
 risk:high"
-  open_pr "$PR_URL"
+  open_pr '[{"url":"'"$PR_URL"'","isCrossRepository":false}]'
   automations '[{"id":"a1","name":"factory-acme/app"}]'
   branch_before=$(git -C "$ORIGIN" rev-parse factory-init)
   : > "$FAKE_LOG"
@@ -202,7 +212,7 @@ test_workspace_of_another_repo_exits_2_without_writes() {
   status=0
   sh "$FACTORY_ROOT/bin/sf-init" --repo acme/other --workspace "$WS" > /dev/null 2> "$TEST_TMP/err" || status=$?
   assert_eq 2 "$status" "exit status"
-  assert_contains "$(cat "$TEST_TMP/err")" "not acme/other"
+  assert_contains "$(cat "$TEST_TMP/err")" "not github.com/acme/other"
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
 
@@ -239,7 +249,7 @@ factory-sensitive: false
 
 test_origin_url_case_is_ignored() {
   world
-  git -C "$WS" remote set-url origin "$TEST_TMP/remote/Acme/App.git"
+  git -C "$WS" remote set-url origin ssh://git@GitHub.com/Acme/App.git
   mv "$TEST_TMP/remote/acme" "$TEST_TMP/remote/Acme"
   mv "$TEST_TMP/remote/Acme/app.git" "$TEST_TMP/remote/Acme/App.git"
   ORIGIN=$TEST_TMP/remote/Acme/App.git
@@ -250,7 +260,7 @@ test_origin_url_case_is_ignored() {
 test_push_url_of_another_repo_exits_2_without_writes() {
   world
   git init -q --bare "$TEST_TMP/remote/acme/evil.git"
-  git -C "$WS" remote set-url --push origin "$TEST_TMP/remote/acme/evil.git"
+  git -C "$WS" remote set-url --push origin git@github.com:acme/evil.git
   status=0
   sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
   assert_eq 2 "$status" "exit status"
@@ -280,4 +290,56 @@ test_symlinked_claude_md_exits_1_naming_it() {
   assert_eq 1 "$status" "exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "CLAUDE.md on main is a symlink"
   assert_eq 0 "$(count_calls "gh pr create")" "PRs"
+}
+
+# The target repo's hooks need its deps, which the temporary worktree lacks; CI on the PR is the gate.
+test_target_repo_hooks_do_not_block_setup() {
+  world
+  hooks=$WS/.git/hooks
+  mkdir -p "$hooks"
+  for h in post-checkout pre-commit commit-msg pre-push; do
+    printf '#!/bin/sh\necho "%s: node_modules missing" >&2\nexit 1\n' "$h" > "$hooks/$h"
+    chmod +x "$hooks/$h"
+  done
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
+  assert_eq 1 "$(count_calls "gh pr create")" "PRs"
+  for h in post-checkout pre-commit commit-msg pre-push; do
+    [ -x "$hooks/$h" ] || fail "hook $h removed from the workspace"
+  done
+}
+
+# An outsider's fork can open a PR from a branch named factory-init too.
+test_fork_pr_from_factory_init_is_not_the_setup_pr() {
+  world
+  open_pr '[{"url":"https://github.com/acme/app/pull/5","isCrossRepository":true}]'
+  sf_init > "$TEST_TMP/out"
+  assert_eq 1 "$(count_calls "gh pr create")" "PRs"
+  case "$(cat "$TEST_TMP/out")" in *pull/5*) fail "output names the fork PR: $(cat "$TEST_TMP/out")" ;; esac
+}
+
+test_unreadable_pr_list_exits_1_without_a_push() {
+  world
+  open_pr '[{"url":"x"}]'
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "open PRs from factory-init not read"
+  assert_eq "" "$(git -C "$ORIGIN" for-each-ref refs/heads/factory-init)" "factory-init on origin"
+}
+
+test_origin_off_github_exits_2_without_writes() {
+  world
+  for url in https://gitlab.com/acme/app.git git@gitlab.com:acme/app.git \
+    https://evil.example/x@github.com/acme/app.git https://github.com.evil.example/acme/app.git \
+    ssh://git@github.com.evil.example/acme/app.git; do
+    git -C "$WS" remote set-url origin "$url"
+    status=0
+    sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+    assert_eq 2 "$status" "exit status for $url"
+    assert_contains "$(cat "$TEST_TMP/err")" "origin URL is [$url], not github.com/acme/app"
+  done
+  assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
