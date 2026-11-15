@@ -6,7 +6,8 @@
 # Run it in the PR branch's worktree, checked out at the PR head with a clean tree.
 #
 # Steps:
-#  1. PR already merged: exit 0. Closed unmerged: stop.
+#  1. PR from a fork (isCrossRepository): stop, merged or not. Already merged: exit 0. Closed
+#     unmerged: stop.
 #  2. The worktree must be on the PR's branch at the PR's head; a head that moved is refused (stop).
 #  3. `gantry-gate-evidence [--bug]` (`--bug` when the issue is labelled bug), then
 #     `gantry-verdict-check --no-label`: every PR needs a PASS verdict at its head, whatever its labels. Gate exit 1 stops; exit 2 is retried next fire.
@@ -74,13 +75,14 @@ stop() {
   exit 1
 }
 
-# pr_view: read the PR into $tmp/pr.json and set state, head, branch, base, draft, mergeable, merge_state.
+# pr_view: read the PR into $tmp/pr.json and set state, cross, head, branch, base, draft, mergeable, merge_state.
 pr_view() {
-  gh pr view "$pr" -R "$repo" --json state,isDraft,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit > "$tmp/pr.json" \
+  gh pr view "$pr" -R "$repo" --json state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit > "$tmp/pr.json" \
     || retry "PR #$pr not read (gh pr view failed)"
-  state='' head='' branch='' base='' draft='' mergeable='' merge_state='' merge_sha=''
+  state='' cross='' head='' branch='' base='' draft='' mergeable='' merge_state='' merge_sha=''
   jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
-  eval "$(jq -r '@sh "state=\(.state) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+  jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
+  eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
 }
 
 merged() {
@@ -91,6 +93,8 @@ merged() {
 
 # --- 1. PR state -------------------------------------------------------------------------------
 pr_view
+# A second check behind sf-state: a fork PR is never the factory's, even one named like its branch.
+[ "$cross" = false ] || stop "PR #$pr is from a fork; the factory never ships cross-repository PRs"
 [ "$state" = MERGED ] && merged
 [ "$state" = OPEN ] || stop "PR #$pr is $state without a merge"
 start_head=$head
