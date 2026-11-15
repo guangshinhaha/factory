@@ -56,9 +56,12 @@ for file in "$@"; do
       TEST_TMP=$tmp/work
       PATH=$fakes:$tmp/guard:$PATH
       # Even a real gh that slipped past the guard would have no credentials.
+      # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
       GH_CONFIG_DIR=$tmp/work/gh-config
+      HOME=$tmp/work/home
+      mkdir "$HOME"
       unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
-      export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR
+      export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
       # shellcheck source=test/lib.sh
       . "$root/test/lib.sh"
       # shellcheck disable=SC1090

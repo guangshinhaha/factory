@@ -7,14 +7,15 @@
 #   <key>.out   printed to stdout (required)
 #   <key>.err   printed to stderr (optional)
 #   <key>.exit  exit status (optional, default 0)
-# <key> is the args joined by "_", with every character outside [A-Za-z0-9._-]
-# turned into "_". Run `fake-cli --key <args...>` to print a key.
+# <key> is the args joined by "_", with every byte outside [A-Za-z0-9._-]
+# turned into "_". Run `fake-cli --key <args...>` to print a key. Keys can
+# collide ("a b" and "a_b"), so pair a replay with assert_called when it matters.
 # A call with no fixture fails with status 97 and names the file it looked for.
 set -u
 
 if [ "${1:-}" = --key ]; then
   shift
-  printf '%s' "$*" | tr -c 'A-Za-z0-9._-' '_'
+  printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'
   echo
   exit 0
 fi
@@ -26,7 +27,7 @@ if [ -n "${FAKE_LOG:-}" ]; then
   printf '%s\n' "$tool${*:+ $*}" >> "$FAKE_LOG"
 fi
 
-key=$(printf '%s' "$*" | tr -c 'A-Za-z0-9._-' '_')
+key=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
 base="${FAKE_FIXTURES:-}/$tool/$key"
 
 if [ -z "${FAKE_FIXTURES:-}" ] || [ ! -f "$base.out" ]; then
