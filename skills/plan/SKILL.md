@@ -23,7 +23,7 @@ Intake sent this issue here because it is multi-file, cross-cutting or has a des
 
 Success status: `planned`. Everything else reports `--outcome failed`.
 
-Unlike other stations, your output is the body: put the whole plan (`### PR 1`, `## Decided`, `## Adversarial review`) in the `worker_done` body, above the result line. The factory posts the body minus its last line on the issue as is, so write it for the build station to follow cold and keep it free of anything else.
+Unlike other stations, your output is the body: put the whole plan (`### PR 1`, `## Decided`, `## Adversarial review`) in the `worker_done` body, above the result line. The factory posts the body minus its last line on the issue as is, so write it for the build station to follow cold and keep it free of anything else. A shinstack friction note, if you have one, goes last under `## shinstack friction`; it is posted with the plan.
 
 - `planned`: `{"station":"plan","status":"planned"}`
 - `stop`: `{"station":"plan","status":"stop","reason":"needs split: the CLI flag and the storage migration are separate PRs; suggest one issue each, migration first"}`
