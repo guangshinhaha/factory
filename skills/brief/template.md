@@ -29,3 +29,5 @@ End with Orca's `worker_done` as your preamble says. Use `--outcome succeeded` o
     factory-result: {"station":"{{station}}","status":"<status>", ...}
 
 Your skill's Result section lists the statuses and the fields each needs. A `stop` or `hold` always has a `reason` a person can act on. The factory reads only this line, so put nothing you need it to act on anywhere else.
+
+If a shinstack file was wrong, unclear or ignored, say so in the body above that line (the file and what went wrong). Don't file it on GitHub: stations write nothing there beyond their one comment.
