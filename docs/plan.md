@@ -21,10 +21,10 @@ principles, not noodle's "everything is a file" design.
 |---|---|---|
 | Conveyor | Orca: one automation per repo, one Run per issue, a task DAG per Run, workers | who runs, liveness |
 | Stations | `factory` plugin skills: foreman, intake, plan, build, review, verify, debrief, triage, init | judgment |
-| Gates | POSIX sh scripts, no judgment: `sf-state`, `sf-precheck`, `sf-gate-evidence`, `sf-verdict-check`, `sf-ship`, `sf-stop` | evidence, merge safety, stop |
+| Gates | POSIX sh scripts, no judgment: `sf-state`, `sf-tick`, `sf-gate-evidence`, `sf-verdict-check`, `sf-ship`, `sf-stop` | evidence, merge safety, stop |
 
 Gate scripts that apply to any repo (evidence, verdict-check) live in gantry per the ownership rule
-("a check with no judgment goes in gantry"). Factory-only scripts (state, precheck, ship, stop) live here.
+("a check with no judgment goes in gantry"). Factory-only scripts (state, tick, ship, stop) live here.
 
 State lives only in GitHub and Orca. Where a fact has no natural home, it goes in a GitHub marker
 comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a local file.
@@ -52,8 +52,7 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
      playbook. Branch from freshly fetched origin default using the repo's branch convention (#227);
      delete a stale remote branch from an earlier closed PR (#186). Commits only.
    - **`sf-gate-evidence`** (script, not an agent): pushes the branch so lefthook's pre-push hook runs gantry's checks
-     (no CLAUDE.md parsing; Shin 2026-11-15); bug work needs a test-only commit before the fix (shell tests and bats count). Then pushes the
-     branch and opens or reuses the draft PR by branch (idempotent; `Closes #N`, opening-a-pr body with
+     (no CLAUDE.md parsing; Shin 2026-11-15); bug work needs a test-only commit before the fix (shell tests and bats count). Then opens or reuses the draft PR by branch (idempotent; `Closes #N`, opening-a-pr body with
      `## Scope`). Fail -> one retry with the exact reason; same rejection twice -> stop.
    - **review** (Codex, cross-model): tier depth (low/medium `/code-review`; high blast-radius +
      interrogate). Posts `Covered:` / `Findings:` as a PR comment. Empty = not run.
