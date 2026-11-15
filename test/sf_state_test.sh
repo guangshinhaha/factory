@@ -46,7 +46,7 @@ readied() { timeline "$1" '[{"event":"labeled","label":{"name":"ready"},"created
 run_json() { printf '{"id":"%s","objective":"factory %s#%s","created_at":"%s"}' "$1" "${4:-$REPO}" "$2" "${3:-2026-11-02T00:00:00Z}"; }
 
 attempt='<!-- factory:{\"kind\":\"attempt\"} -->'
-comment() { printf '{"event":"commented","body":"%s","created_at":"%s"}' "$1" "$2"; }
+comment() { printf '{"event":"commented","author_association":"OWNER","body":"%s","created_at":"%s"}' "$1" "$2"; }
 
 sf_state() { sh "$FACTORY_ROOT/bin/sf-state" "$@"; }
 state() { sf_state "$REPO"; }
@@ -290,4 +290,79 @@ test_bad_concurrency_value_is_an_error() {
   sf_state "$REPO" > /dev/null 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "factory-concurrency in CLAUDE.md is not a whole number" "stderr"
+}
+
+# Review findings on PR #16.
+
+test_live_run_from_before_a_re_ready_is_still_the_current_run() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-06T00:00:00Z"}]'
+  runs "[$(run_json run_a 7 2026-11-02T00:00:00Z)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_restart_takes_a_concurrency_slot() {
+  world
+  issues "[$(ready_issue_json 5),$(ready_issue_json 6),$(ready_issue_json 7)]"
+  readied 5
+  timeline 6 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"hold\",\"provider\":\"claude\",\"reset\":\"2001-01-01T00:00:00Z\"} -->' 2026-11-01T01:00:00Z)]"
+  readied 7
+  runs "[$(run_json run_a 5),$(run_json run_b 6)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  tasks run_b '[{"id":"t2","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"restart","issue":6,"run":"run_b","task":"t2"}]' "$(state)" "actions"
+}
+
+test_timeline_that_is_not_a_json_array_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  printf '' | fixture gh api "repos/$REPO/issues/7/timeline" --paginate
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: timeline of #7 not read" "stderr"
+}
+
+test_markers_from_non_collaborators_are_ignored() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},{\"event\":\"commented\",\"author_association\":\"NONE\",\"body\":\"<!-- factory:{\\\"kind\\\":\\\"hold\\\",\\\"reset\\\":\\\"2099-01-01T00:00:00Z\\\"} -->\",\"created_at\":\"2026-11-02T00:00:00Z\"}]"
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_hold_without_a_valid_utc_reset_is_ignored() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"hold\"} -->' 2026-11-02T00:00:00Z),$(comment '<!-- factory:{\"kind\":\"hold\",\"reset\":\"soon\"} -->' 2026-11-02T00:01:00Z)]"
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_dependency_list_forms_hold() {
+  world
+  issues "[$(ready_issue_json 1 'Depends on:\n- #3'),$(ready_issue_json 2 '## Depends on #3'),$(ready_issue_json 4 '## Depends on\n1. #3'),$(ready_issue_json 5 '## Depends on\n- [ ] #3'),$(ready_issue_json 6 '**Depends on** #3'),{\"number\":3,\"labels\":[],\"body\":\"\"}]"
+  for n in 1 2 4 5 6; do readied "$n"; done
+  assert_eq '[{"action":"hold","issue":1,"reason":"depends on open #3"},{"action":"hold","issue":2,"reason":"depends on open #3"},{"action":"hold","issue":4,"reason":"depends on open #3"},{"action":"hold","issue":5,"reason":"depends on open #3"},{"action":"hold","issue":6,"reason":"depends on open #3"}]' "$(state)" "actions"
+}
+
+test_new_run_with_no_tasks_yet_is_live() {
+  world
+  printf 'factory-concurrency: 1\n' > CLAUDE.md
+  issues "[$(ready_issue_json 7),$(ready_issue_json 8)]"
+  readied 7
+  readied 8
+  runs "[$(run_json run_a 7 2099-01-01T00:00:00Z)]"
+  tasks run_a '[]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_starts_the_issue_readied_first() {
+  world
+  printf 'factory-concurrency: 1\n' > CLAUDE.md
+  issues "[$(ready_issue_json 4),$(ready_issue_json 9)]"
+  timeline 4 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-05T00:00:00Z"}]'
+  timeline 9 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"}]'
+  assert_eq '[{"action":"start","issue":9}]' "$(state)" "actions"
 }
