@@ -3,12 +3,12 @@
 # worker of a station gets the same brief. Line 1 is `factory-role: <station>`.
 # Usage: sf-brief <station> --repo owner/repo --issue N [--branch B] [--pr N] [--tier T]
 #                 [--work-type W] [--round N]
-#   station    intake | build | review | verify
+#   station    intake | plan | build | review | verify | debrief
 #   --tier     none | low | medium | high (intake's decision)
 #   --work-type feature | bug-fix | refactoring (intake's decision; names the build playbook)
 #   --round    1 or 2: build and review's rework round (default 1)
-# Needs: intake --repo --issue; build also --branch --tier --work-type (and --pr in round 2);
-# review and verify also --branch --pr --tier.
+# Needs: intake and plan --repo --issue; build also --branch --tier --work-type (and --pr in round 2);
+# review and verify also --branch --pr --tier; debrief also --branch (and --pr when the Run has one).
 #
 # Skills and playbooks are named by absolute path, so any agent can read them (Codex can't load
 # Claude Code skills). shinstack is SHINSTACK_ROOT, else shinstack@shinstack's installPath in
@@ -22,12 +22,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/factory.sh
 . "$root/lib/factory.sh"
 
-[ $# -ge 1 ] || usage_error "usage: sf-brief <intake|build|review|verify> --repo owner/repo --issue N [options]"
+[ $# -ge 1 ] || usage_error "usage: sf-brief <intake|plan|build|review|verify|debrief> --repo owner/repo --issue N [options]"
 station=$1
 shift
 case "$station" in
-  intake | build | review | verify) ;;
-  *) usage_error "station [$station] is not intake, build, review or verify" ;;
+  intake | plan | build | review | verify | debrief) ;;
+  *) usage_error "station [$station] is not intake, plan, build, review, verify or debrief" ;;
 esac
 
 repo='' issue='' branch='' pr='' tier='' work_type='' round=1
@@ -76,6 +76,9 @@ case "$station" in
     need --pr "$pr"
     need --tier "$tier"
     ;;
+  debrief)
+    need --branch "$branch"
+    ;;
 esac
 # Only build and review have rounds; only build has a work type.
 case "$station" in build | review) ;; *) round='' ;; esac
@@ -91,23 +94,27 @@ fi
 
 case "$station" in
   intake) playbook=feature.md ;;
+  plan) playbook=plan.md ;;
   build) playbook=$work_type.md ;;
   review) playbook=opening-a-pr.md ;;
   verify) playbook=ship.md ;;
+  debrief) playbook= ;; # no shinstack playbook: the skill is the whole job
 esac
-playbook=$shinstack/playbooks/$playbook
+[ -z "$playbook" ] || playbook=$shinstack/playbooks/$playbook
 skill=$root/skills/$station/SKILL.md
 template=$root/skills/brief/template.md
 for f in "$template" "$skill"; do
   [ -f "$f" ] || die "file not found: $f"
 done
-[ -f "$playbook" ] || die "playbook not found: $playbook (shinstack at $shinstack predates the playbooks/ layout?)"
+[ -z "$playbook" ] || [ -f "$playbook" ] || die "playbook not found: $playbook (shinstack at $shinstack predates the playbooks/ layout?)"
 
 case "$station" in
   intake) proof="Your result line carries the decision: \`go\` with tier, work type and whether a plan comes first, or \`stop\` or \`hold\` with the reason. You change nothing: no commits, no GitHub writes." ;;
   build) proof="Commits on $branch that meet the issue's Done when and pass the repo's checks, with a clean working tree. Your result line names the head SHA." ;;
   review) proof="One comment on PR #$pr with a \`Covered:\` line and a \`Findings:\` list, for the PR's head SHA. Your result line has its URL." ;;
   verify) proof="One comment on PR #$pr holding the verdict JSON for the PR's head SHA, in the format \`gantry-verdict-check\` reads. Your result line has its URL and the verdict." ;;
+  plan) proof="The plan in your \`worker_done\` body, above the result line, for the build station to follow. You change nothing: no commits, no GitHub writes." ;;
+  debrief) proof="Project lessons committed to docs/solutions/ on $branch with a clean working tree, or none if nothing is worth keeping. General lessons in your result line." ;;
 esac
 case "$station" in
   review | verify) comment_rule="Post exactly one comment on PR #$pr, as your skill says. Nothing else writes to GitHub." ;;
