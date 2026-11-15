@@ -1,0 +1,11 @@
+{
+  "name": "factory",
+  "owner": { "name": "guangshinhaha" },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": "./",
+      "description": "Orca-native software factory: ready GitHub issues to merged PRs."
+    }
+  ]
+}

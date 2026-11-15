@@ -1,0 +1,40 @@
+#!/bin/sh
+# Fake CLI shared by test/fakes/gh and test/fakes/orca.
+# Usage: fake-cli <tool> [args...]
+#
+# Logs the call to $FAKE_LOG as one line ("<tool> <args...>"), then replays the
+# fixture for exactly those args from $FAKE_FIXTURES/<tool>/<key>:
+#   <key>.out   printed to stdout (required)
+#   <key>.err   printed to stderr (optional)
+#   <key>.exit  exit status (optional, default 0)
+# <key> is the args joined by "_", with every character outside [A-Za-z0-9._-]
+# turned into "_". Run `fake-cli --key <args...>` to print a key.
+# A call with no fixture fails with status 97 and names the file it looked for.
+set -u
+
+if [ "${1:-}" = --key ]; then
+  shift
+  printf '%s' "$*" | tr -c 'A-Za-z0-9._-' '_'
+  echo
+  exit 0
+fi
+
+tool=$1
+shift
+
+if [ -n "${FAKE_LOG:-}" ]; then
+  printf '%s\n' "$tool${*:+ $*}" >> "$FAKE_LOG"
+fi
+
+key=$(printf '%s' "$*" | tr -c 'A-Za-z0-9._-' '_')
+base="${FAKE_FIXTURES:-}/$tool/$key"
+
+if [ -z "${FAKE_FIXTURES:-}" ] || [ ! -f "$base.out" ]; then
+  echo "fake $tool: no fixture for \"$tool $*\" (missing $base.out)" >&2
+  exit 97
+fi
+
+cat "$base.out"
+if [ -f "$base.err" ]; then cat "$base.err" >&2; fi
+if [ -f "$base.exit" ]; then exit "$(cat "$base.exit")"; fi
+exit 0

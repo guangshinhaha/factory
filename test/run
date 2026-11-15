@@ -1,0 +1,87 @@
+#!/bin/sh
+# Runs test files: every test_* function in each file, each in its own subshell.
+# Usage: test/run [file...]   (default: test/*_test.sh)
+#
+# Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
+# $FACTORY_FAKES (default test/fakes). The guard dir holds gh and orca shims
+# that log and exit 99, so a call that finds no fake never reaches the real
+# CLI, and any guard hit fails the test even if the test ignored the error.
+set -u
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+fakes=${FACTORY_FAKES:-$root/test/fakes}
+
+if [ $# -eq 0 ]; then
+  set -- "$root"/test/*_test.sh
+fi
+
+passed=0
+failed=0
+
+# write_guard <dir> <tool> <log>
+write_guard() {
+  cat > "$1/$2" <<GUARD
+#!/bin/sh
+printf '%s\n' "$2 \$*" >> "$3"
+echo "guard: real $2 reached (no fake $2 on PATH): $2 \$*" >&2
+exit 99
+GUARD
+  chmod +x "$1/$2"
+}
+
+for file in "$@"; do
+  if [ ! -f "$file" ]; then
+    echo "FAIL $file: test file not found"
+    failed=$((failed + 1))
+    continue
+  fi
+  path=$(cd "$(dirname "$file")" && pwd)/$(basename "$file")
+  name=${path#"$root"/}
+  fns=$(sed -n 's/^\(test_[A-Za-z0-9_]*\)[[:space:]]*().*/\1/p' "$path")
+  if [ -z "$fns" ]; then
+    echo "FAIL $name: no test_* functions in file"
+    failed=$((failed + 1))
+    continue
+  fi
+  for fn in $fns; do
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || exit 1
+    mkdir "$tmp/guard" "$tmp/work"
+    write_guard "$tmp/guard" gh "$tmp/guard.log"
+    write_guard "$tmp/guard" orca "$tmp/guard.log"
+    : > "$tmp/calls.log"
+    (
+      FACTORY_ROOT=$root
+      FAKE_LOG=$tmp/calls.log
+      FAKE_FIXTURES=
+      TEST_TMP=$tmp/work
+      PATH=$fakes:$tmp/guard:$PATH
+      # Even a real gh that slipped past the guard would have no credentials.
+      GH_CONFIG_DIR=$tmp/work/gh-config
+      unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+      export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR
+      # shellcheck source=test/lib.sh
+      . "$root/test/lib.sh"
+      # shellcheck disable=SC1090
+      . "$path"
+      set -e
+      "$fn"
+    ) > "$tmp/out" 2>&1
+    status=$?
+    if [ -s "$tmp/guard.log" ]; then
+      echo "guard: test reached a real CLI: $(tr '\n' ';' < "$tmp/guard.log")" >> "$tmp/out"
+      status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+      passed=$((passed + 1))
+      echo "ok   $name $fn"
+    else
+      failed=$((failed + 1))
+      echo "FAIL $name $fn"
+      sed 's/^/     /' "$tmp/out"
+    fi
+    rm -rf "$tmp"
+  done
+done
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]
