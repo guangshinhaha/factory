@@ -103,7 +103,8 @@ test_values_outside_their_pattern_are_refused() {
 test_shinstack_comes_from_the_installed_plugins_file() {
   mkdir -p "$HOME/.claude/plugins" "$TEST_TMP/ss/playbooks"
   echo '# feature' > "$TEST_TMP/ss/playbooks/feature.md"
-  jq -n --arg p "$TEST_TMP/ss" '{plugins: {"shinstack@shinstack": [{installPath: $p}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
+  # printf, not jq --arg: MSYS rewrites a /tmp path argument to C:/... for native jq on Windows.
+  printf '{"plugins":{"shinstack@shinstack":[{"installPath":"%s"}]}}\n' "$TEST_TMP/ss" > "$HOME/.claude/plugins/installed_plugins.json"
   unset SHINSTACK_ROOT
   brief intake --repo acme/app --issue 7
   assert_contains "$(cat "$TEST_TMP/brief")" "- shinstack: $TEST_TMP/ss"
