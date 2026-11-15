@@ -35,7 +35,9 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
    so most fires start no agent.
 2. **`sf-tick` (foreman as a script, Shin 2026-11-15).** Runs as the automation's precheck, so no agent starts and scheduling costs no tokens. Takes a `mkdir` lock (two overlapping fires: the second exits). Runs `sf-state`, which
    prints the *action list* as JSON: `start #N`, `advance run R`, `stop #N reason`, `ship PR`, `hold #N`.
-   `sf-tick` carries out the list itself and exits non-zero. Judgment lives only in the stations.
+   A precheck cannot bind a Run (no terminal identity), so when the list is non-empty `sf-tick` spawns
+   `sf-act` via `orca terminal create`; `sf-act` re-binds (`run-use`) and acts, then exits. `sf-tick` always
+   exits non-zero. See docs/decisions/orca-run-lifecycle.md. Judgment lives only in the stations.
    `sf-state` rules:
    - list open issues once and filter with jq; never the GitHub search API (26h block, shinfactory#175);
    - join issue -> Runs with `orca reference find`; join issue -> PR by branch, not by memory;
@@ -88,7 +90,7 @@ sprites/cursor/process runtimes, $ spend cap (read $0.00 on Orca, #219; attempt 
 steer box, brain/meditate, reused foreman session.
 
 ## shinstack changes (PR in shinstack)
-- Replace the `NOODLE_WORKTREE` contract in skills/craft with `SHINFACTORY_ROLE=<station>`.
+- Replace the `NOODLE_WORKTREE` contract in skills/craft with a brief first line `factory-role: <station>` (workers don't inherit env; spike #10).
 - Remove shinstack's .noodle.toml, copied .agents/skills, adapters/github/backlog-*.
 - Update docs/decisions/shinstack-vs-shinfactory.md: "who" moves to Orca; factory keeps when + policy.
 - Point autopilot/orchestrate "Make it enforceable (factory)" notes at the gates.
@@ -123,7 +125,7 @@ steer box, brain/meditate, reused foreman session.
 - After cutover, keep shinfactory open until its open issues are triaged, then archive it.
 
 ## Open
-- Spike answers (step 0) may change the foreman design.
+- Spike done (docs/decisions/orca-run-lifecycle.md): design holds; sf-tick spawns sf-act; role travels in the brief.
 
 ## Advisor review (Fable, 2026-11-15): applied
 - Attempts from GitHub markers since last `ready`, not Run count (Run count never resets).
