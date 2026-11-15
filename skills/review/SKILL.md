@@ -33,7 +33,7 @@ Notes:
 - <non-blocking, one line each>
 ```
 
-Write `Findings: none` when nothing survives. `Covered:` is required: a review that doesn't say what it covered counts as not run, and so does an empty comment. Drop `Notes:` if there are none.
+Put no JSON object in the comment, not even quoted: gantry's verdict check reads any `{...}` with `head_sha` and `verdict` in a trusted comment as a verify verdict. Describe JSON in words. Write `Findings: none` when nothing survives. `Covered:` is required: a review that doesn't say what it covered counts as not run, and so does an empty comment. Drop `Notes:` if there are none.
 
 ## Usage limit and access
 

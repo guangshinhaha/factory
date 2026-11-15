@@ -47,6 +47,10 @@ while [ $# -gt 0 ]; do
 done
 
 # Every value is checked against a narrow pattern, so nothing in the brief comes from free text.
+# grep matches line by line, so a value with a newline must be refused before it.
+NL='
+'
+case "$repo$branch" in *"$NL"*) usage_error "--repo or --branch holds a newline" ;; esac
 printf '%s\n' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || usage_error "--repo [$repo] is not owner/repo"
 is_number "$issue" || usage_error "--issue [$issue] is not a number"
 [ -z "$pr" ] || is_number "$pr" || usage_error "--pr [$pr] is not a number"
