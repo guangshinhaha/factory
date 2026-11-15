@@ -33,7 +33,9 @@ world() {
 }
 
 issues() { printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body; }
-prs() { printf '%s\n' "$1" | fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName; }
+# prs <json>: open PRs; a PR without isCrossRepository is from the repo itself (false).
+prs() { printf '%s\n' "$1" | jq -c 'map(if type == "object" and (has("isCrossRepository") | not) then . + {isCrossRepository: false} else . end)' | prs_raw; }
+prs_raw() { fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName,isCrossRepository; }
 runs() { printf '{"ok":true,"result":{"runs":%s,"nextCursor":null}}\n' "$1" | fixture orca orchestration run-list --json --full --limit 100; }
 tasks() { printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orca orchestration task-list --run "$1" --json; }
 timeline() { printf '%s\n' "$2" | fixture gh api "repos/$REPO/issues/$1/timeline" --paginate; }
@@ -89,6 +91,26 @@ test_ready_ship_task_ships_the_pr_found_by_branch() {
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t9","status":"ready","title":"ship"}]'
   prs '[{"number":40,"headRefName":"someone/app-17-other"},{"number":41,"headRefName":"someone/app-7-add-login"}]'
+  assert_eq '[{"action":"ship","issue":7,"run":"run_a","task":"t9","pr":41}]' "$(state)" "actions"
+}
+
+test_fork_pr_on_a_factory_branch_is_never_shipped() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"number":66,"headRefName":"app-7-add-login","isCrossRepository":true}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"ship task ready but no open PR on a branch named app-7-*"}]' "$(state)" "actions"
+}
+
+test_same_repo_pr_ships_even_when_a_fork_pr_matches_first() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"number":66,"headRefName":"app-7-evil","isCrossRepository":true},{"number":41,"headRefName":"someone/app-7-add-login","isCrossRepository":false}]'
   assert_eq '[{"action":"ship","issue":7,"run":"run_a","task":"t9","pr":41}]' "$(state)" "actions"
 }
 
@@ -540,6 +562,16 @@ test_pr_without_a_number_is_an_error() {
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
   prs '[{"headRefName":"someone/app-7-x"}]'
+  fails_with "sf-state: open PRs not listed"
+}
+
+test_pr_without_a_cross_repository_flag_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  echo '[{"number":41,"headRefName":"someone/app-7-x"}]' | prs_raw
   fails_with "sf-state: open PRs not listed"
 }
 
