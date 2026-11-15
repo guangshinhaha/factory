@@ -6,6 +6,6 @@ remotes:
     refetch_frequency: 24h
     configs:
       - hooks/base.yml
-      - hooks/node.yml
+      # - hooks/node.yml   # no package.json: POSIX sh repo
       # - hooks/prisma.yml
       # - hooks/nextjs.yml

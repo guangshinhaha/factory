@@ -23,6 +23,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    with:
+      node: false   # POSIX sh repo, no package.json
     # gantry:optional
     # with:
     #   runs-on: '["self-hosted","gantry"]'   # once your runner is up
