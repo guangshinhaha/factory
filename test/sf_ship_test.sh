@@ -5,7 +5,7 @@
 
 REPO=acme/app
 READIED='{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"}'
-PR_FIELDS=state,isDraft,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit
+PR_FIELDS=state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit
 
 git_q() { git -c init.defaultBranch=main -c advice.detachedHead=false "$@" > /dev/null 2>&1; }
 
@@ -53,7 +53,7 @@ world() {
 # pr_json <state> <draft> <mergeable> <mergeStateStatus> [head] [merge sha]
 pr_json() {
   jq -cn --arg s "$1" --argjson d "$2" --arg m "$3" --arg ms "$4" --arg h "${5:-$HEAD_SHA}" --arg mc "${6:-}" \
-    '{state: $s, isDraft: $d, headRefName: "app-7", headRefOid: $h, baseRefName: "main", mergeable: $m, mergeStateStatus: $ms,
+    '{state: $s, isDraft: $d, isCrossRepository: false, headRefName: "app-7", headRefOid: $h, baseRefName: "main", mergeable: $m, mergeStateStatus: $ms,
       mergeCommit: (if $mc == "" then null else {oid: $mc} end)}'
 }
 # pr <args of pr_json>: every read of PR #9 returns this.
@@ -131,6 +131,45 @@ test_merge_override_ask_parks_in_auto_mode() {
   git_q checkout app-7
   ship_status
   assert_eq PARKED "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_fork_pr_stops_before_the_gates() {
+  world auto
+  pr_json OPEN false MERGEABLE CLEAN | jq -c '.isCrossRepository = true' | fixture gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_eq "STOPPED: PR #9 is from a fork; the factory never ships cross-repository PRs" "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gantry-")" "gate calls"
+  assert_eq 0 "$(count_calls "gh pr ready")" "ready calls"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+  assert_called "gh issue edit 7 -R $REPO --add-label needs-shin --remove-label ready"
+}
+
+test_merged_fork_pr_is_not_reported_merged() {
+  world auto
+  pr_json MERGED false UNKNOWN UNKNOWN "$HEAD_SHA" abc123 | jq -c '.isCrossRepository = true' | fixture gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(last_line)" "STOPPED: PR #9 is from a fork"
+}
+
+test_fork_flag_on_a_later_read_still_stops() {
+  world auto
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_json MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123 | jq -c '.isCrossRepository = true' | fixture_seq 2 gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(last_line)" "STOPPED: PR #9 is from a fork"
+}
+
+test_pr_with_an_unreadable_cross_repository_flag_is_retried() {
+  world auto
+  pr_json OPEN false MERGEABLE CLEAN | jq -c 'del(.isCrossRepository)' | fixture gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
+  ship_status
+  assert_eq 2 "$status" "exit status"
+  assert_contains "$(last_line)" "RETRY: PR #9 not read: isCrossRepository"
+  assert_eq 0 "$(count_calls "gantry-")" "gate calls"
   assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
 }
 

@@ -7,7 +7,7 @@
 # Actions, one object each, sorted by issue:
 #   {"action":"start","issue":N}                         no Run yet; capacity, attempts and deps allow it
 #   {"action":"advance","issue":N,"run":R,"task":T}      task T of a live Run is ready
-#   {"action":"ship","issue":N,"run":R,"task":T,"pr":P}  the Run's `ship` task is ready; P found by branch
+#   {"action":"ship","issue":N,"run":R,"task":T,"pr":P}  the Run's `ship` task is ready; P found by branch, never a fork PR
 #   {"action":"restart","issue":N,"run":R,"task":T}      dead Run, its hold marker's reset has passed
 #   {"action":"stop","issue":N,"reason":S}               dead Run with no hold, or 3 attempts since ready
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
@@ -56,10 +56,12 @@ gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "
   || die "open issues not listed (gh issue list failed)"
 jq -e 'type == "array"' "$tmp/issues.json" > /dev/null 2>&1 || die "open issues not listed: gh issue list printed no JSON array"
 
-gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName > "$tmp/prs.json" \
+# A fork PR is never the factory's, whatever its branch is named: drop it before matching.
+gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCrossRepository > "$tmp/prs.raw" \
   || die "open PRs not listed (gh pr list failed)"
-jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.headRefName | type == "string"))' "$tmp/prs.json" > /dev/null 2>&1 \
-  || die "open PRs not listed: gh pr list printed no array of PRs with number and headRefName"
+jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean"))' "$tmp/prs.raw" > /dev/null 2>&1 \
+  || die "open PRs not listed: gh pr list printed no array of PRs with number, headRefName and isCrossRepository"
+jq -c '[.[] | select(.isCrossRepository == false)]' "$tmp/prs.raw" > "$tmp/prs.json" || die "open PRs not filtered (jq failed)"
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
