@@ -34,6 +34,48 @@ test_every_station_brief_starts_with_its_factory_role_line() {
   assert_eq "factory-role: review" "$(head -n 1 "$TEST_TMP/brief")" "review line 1"
   brief verify --repo acme/app --issue 7 --branch app-7-greet --pr 12 --tier medium
   assert_eq "factory-role: verify" "$(head -n 1 "$TEST_TMP/brief")" "verify line 1"
+  brief plan --repo acme/app --issue 7
+  assert_eq "factory-role: plan" "$(head -n 1 "$TEST_TMP/brief")" "plan line 1"
+  brief debrief --repo acme/app --issue 7 --branch app-7-greet
+  assert_eq "factory-role: debrief" "$(head -n 1 "$TEST_TMP/brief")" "debrief line 1"
+}
+
+test_plan_brief_names_the_plan_playbook_and_returns_the_plan_in_the_body() {
+  shinstack
+  brief plan --repo acme/app --issue 7
+  b=$(cat "$TEST_TMP/brief")
+  assert_contains "$b" "Read $FACTORY_ROOT/skills/plan/SKILL.md in full"
+  assert_contains "$b" "- Playbook: $SHINSTACK_ROOT/playbooks/plan.md"
+  assert_contains "$b" "The plan in your \`worker_done\` body"
+  assert_contains "$b" "- Write nothing to GitHub."
+  for fact in "- Branch:" "- PR:" "- Tier:" "- Work type:" "- Round:"; do
+    if grep -qF -- "$fact" "$TEST_TMP/brief"; then fail "plan brief has [$fact]"; fi
+  done
+}
+
+test_debrief_brief_needs_a_branch_and_names_no_playbook() {
+  shinstack
+  refused 2 "debrief needs --branch" debrief --repo acme/app --issue 7
+  brief debrief --repo acme/app --issue 7 --branch app-7-greet --pr 12
+  b=$(cat "$TEST_TMP/brief")
+  assert_contains "$b" "Read $FACTORY_ROOT/skills/debrief/SKILL.md in full"
+  assert_contains "$b" "- Branch: app-7-greet"
+  assert_contains "$b" "- PR: https://github.com/acme/app/pull/12 (PR #12)"
+  assert_contains "$b" "committed to docs/solutions/ on app-7-greet"
+  assert_contains "$b" "- Write nothing to GitHub."
+  if grep -qF -- "- Playbook:" "$TEST_TMP/brief"; then fail "debrief brief names a playbook"; fi
+  if grep -q '{{' "$TEST_TMP/brief"; then fail "placeholder left in brief: $(grep '{{' "$TEST_TMP/brief")"; fi
+}
+
+test_triage_is_not_a_station_and_lists_issues_without_the_search_api() {
+  f=$FACTORY_ROOT/skills/triage/SKILL.md
+  [ -f "$f" ] || fail "skill not found: skills/triage/SKILL.md"
+  assert_eq "name: triage" "$(sed -n 2p "$f")" "skills/triage frontmatter name"
+  assert_contains "$(cat "$f")" "Not a station"
+  # gh issue/pr list with --label or --search goes through GitHub search (shinfactory#175).
+  if grep -nE 'gh (issue|pr) list[^`]*--(label|search)' "$f"; then
+    fail "triage lists issues through the search API"
+  fi
 }
 
 test_brief_names_skill_playbook_and_shinstack_by_absolute_path_and_fills_every_placeholder() {
@@ -88,7 +130,7 @@ test_missing_station_facts_are_refused() {
 
 test_values_outside_their_pattern_are_refused() {
   shinstack
-  refused 2 "station [plan] is not" plan --repo acme/app --issue 7
+  refused 2 "station [triage] is not" triage --repo acme/app --issue 7
   refused 2 "--tier [urgent] is not" verify --repo acme/app --issue 7 --branch b --pr 1 --tier urgent
   refused 2 "--work-type [chore] is not" build --repo acme/app --issue 7 --branch b --tier low --work-type chore
   refused 2 "is not a plain branch name" review --repo acme/app --issue 7 --branch 'b; rm -rf /' --pr 1 --tier low
@@ -120,7 +162,7 @@ test_no_shinstack_or_an_old_layout_fails() {
 }
 
 test_station_skills_name_their_station_and_only_current_shinstack_paths() {
-  for s in intake build review verify; do
+  for s in intake plan build review verify debrief; do
     f=$FACTORY_ROOT/skills/$s/SKILL.md
     [ -f "$f" ] || fail "skill not found: skills/$s/SKILL.md"
     assert_eq "name: $s" "$(sed -n 2p "$f")" "skills/$s frontmatter name"
@@ -133,7 +175,7 @@ test_station_skills_name_their_station_and_only_current_shinstack_paths() {
 }
 
 test_every_result_example_in_a_skill_is_json_for_that_station() {
-  for s in intake build review verify; do
+  for s in intake plan build review verify debrief; do
     # shellcheck disable=SC2016 # literal backticks around each result example
     grep -o '`{"station":[^`]*}`' "$FACTORY_ROOT/skills/$s/SKILL.md" | tr -d '`' > "$TEST_TMP/results"
     [ -s "$TEST_TMP/results" ] || fail "skills/$s has no result examples"
