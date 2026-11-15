@@ -1,0 +1,293 @@
+# shellcheck shell=sh
+# sf-state: the next actions, computed from GitHub (fake gh) and Orca (fake orca).
+# Each test builds its world inline with the helpers below. The repo is acme/app.
+
+REPO=acme/app
+
+# fixture <tool> <args...>: stdin becomes the fake's stdout for exactly those args.
+fixture() {
+  tool=$1
+  shift
+  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@")
+  mkdir -p "$FAKE_FIXTURES/$tool"
+  cat > "$FAKE_FIXTURES/$tool/$key.out"
+}
+
+# fixture_fail <tool> <args...>: the call fails with status 1 and a message.
+fixture_fail() {
+  fixture "$@" < /dev/null
+  echo 1 > "$FAKE_FIXTURES/$tool/$key.exit"
+  echo "HTTP 502: Bad Gateway" > "$FAKE_FIXTURES/$tool/$key.err"
+}
+
+# An empty world: no issues, no Runs, no PRs, factory-concurrency 2.
+world() {
+  FAKE_FIXTURES=$TEST_TMP/fx
+  export FAKE_FIXTURES
+  mkdir -p "$FAKE_FIXTURES"
+  cd "$TEST_TMP" || fail "test dir not entered: $TEST_TMP"
+  printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
+  issues '[]'
+  runs '[]'
+  prs '[]'
+}
+
+issues() { printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body; }
+prs() { printf '%s\n' "$1" | fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName; }
+runs() { printf '{"ok":true,"result":{"runs":%s,"nextCursor":null}}\n' "$1" | fixture orca orchestration run-list --json --full --limit 100; }
+tasks() { printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orca orchestration task-list --run "$1" --json; }
+timeline() { printf '%s\n' "$2" | fixture gh api "repos/$REPO/issues/$1/timeline" --paginate; }
+
+# ready_issue <n> [body]: an open issue labelled ready, readied at 2026-11-01, no comments.
+ready_issue_json() { printf '{"number":%s,"labels":[{"name":"ready"}],"body":"%s"}' "$1" "${2:-}"; }
+readied() { timeline "$1" '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"}]'; }
+
+# run_json <id> <issue> [created_at] [repo]
+run_json() { printf '{"id":"%s","objective":"factory %s#%s","created_at":"%s"}' "$1" "${4:-$REPO}" "$2" "${3:-2026-11-02T00:00:00Z}"; }
+
+attempt='<!-- factory:{\"kind\":\"attempt\"} -->'
+comment() { printf '{"event":"commented","body":"%s","created_at":"%s"}' "$1" "$2"; }
+
+sf_state() { sh "$FACTORY_ROOT/bin/sf-state" "$@"; }
+state() { sf_state "$REPO"; }
+
+test_fresh_ready_issue_starts() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_non_ready_issues_are_ignored() {
+  world
+  issues '[{"number":1,"labels":[],"body":""},{"number":2,"labels":[{"name":"needs-shin"}],"body":""},{"number":3,"labels":[{"name":"icebox"}],"body":""},{"number":4,"labels":[{"name":"ready"},{"name":"needs-shin"}],"body":""}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_live_run_with_dispatched_task_needs_nothing() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"},{"id":"t2","status":"pending","title":"review","deps":"[\"t1\"]"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_live_run_with_ready_task_advances() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t2","status":"ready","title":"review"}]'
+  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
+}
+
+test_ready_ship_task_ships_the_pr_found_by_branch() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"number":40,"headRefName":"someone/app-17-other"},{"number":41,"headRefName":"someone/app-7-add-login"}]'
+  assert_eq '[{"action":"ship","issue":7,"run":"run_a","task":"t9","pr":41}]' "$(state)" "actions"
+}
+
+test_ready_ship_task_with_no_pr_owes_a_stop() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"number":40,"headRefName":"someone/app-70-x"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"ship task ready but no open PR on a branch named app-7-*"}]' "$(state)" "actions"
+}
+
+test_dead_run_without_hold_owes_a_stop_and_is_never_started() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"},{"id":"t2","status":"pending","title":"review"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+}
+
+test_run_with_no_tasks_owes_a_stop() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a has no tasks"}]' "$(state)" "actions"
+}
+
+test_dead_run_with_expired_hold_restarts_the_failed_task() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment "$attempt" 2026-11-01T00:01:00Z),$(comment '<!-- factory:{\"kind\":\"hold\",\"provider\":\"claude\",\"reset\":\"2001-01-01T00:00:00Z\"} -->' 2026-11-01T01:00:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t2","status":"failed","title":"review"}]'
+  assert_eq '[{"action":"restart","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
+}
+
+test_hold_consumed_by_a_restart_no_longer_applies() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"hold\",\"provider\":\"claude\",\"reset\":\"2001-01-01T00:00:00Z\"} -->' 2026-11-01T01:00:00Z),$(comment '<!-- factory:{\"kind\":\"restart\"} -->' 2026-11-01T02:00:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t2","status":"failed","title":"review"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task review failed"}]' "$(state)" "actions"
+}
+
+test_unexpired_hold_waits_and_blocks_every_start_in_the_repo() {
+  world
+  issues "[$(ready_issue_json 7),$(ready_issue_json 8)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"hold\",\"provider\":\"codex\",\"reset\":\"2099-01-01T00:00:00Z\"} -->' 2026-11-01T01:00:00Z)]"
+  readied 8
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t2","status":"failed","title":"review"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_three_attempts_since_ready_owes_a_stop() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment "$attempt" 2026-11-02T00:00:00Z),$(comment "$attempt" 2026-11-03T00:00:00Z),$(comment "$attempt" 2026-11-04T00:00:00Z)]"
+  assert_eq '[{"action":"stop","issue":7,"reason":"3 attempts since it was last labelled ready"}]' "$(state)" "actions"
+}
+
+# Re-readying resets the count, and a dead Run from before the re-ready is history, not a stop.
+test_re_readied_issue_after_three_attempts_gets_a_fresh_count() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment "$attempt" 2026-11-02T00:00:00Z),$(comment "$attempt" 2026-11-03T00:00:00Z),$(comment "$attempt" 2026-11-04T00:00:00Z),{\"event\":\"unlabeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-05T00:00:00Z\"},{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-06T00:00:00Z\"}]"
+  runs "[$(run_json run_old 7 2026-11-04T00:00:00Z)]"
+  tasks run_old '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_concurrency_full_starts_nothing() {
+  world
+  issues "[$(ready_issue_json 5),$(ready_issue_json 6),$(ready_issue_json 7)]"
+  readied 5
+  readied 6
+  readied 7
+  runs "[$(run_json run_a 5),$(run_json run_b 6)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  tasks run_b '[{"id":"t1","status":"dispatched","title":"build"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_starts_oldest_issues_up_to_factory_concurrency() {
+  world
+  printf 'factory-concurrency: 1\n' > CLAUDE.md
+  issues "[$(ready_issue_json 9),$(ready_issue_json 4)]"
+  readied 9
+  readied 4
+  assert_eq '[{"action":"start","issue":4}]' "$(state)" "actions"
+}
+
+test_concurrency_defaults_to_two_without_the_claude_md_line() {
+  world
+  printf '# app\n' > CLAUDE.md
+  issues "[$(ready_issue_json 1),$(ready_issue_json 2),$(ready_issue_json 3)]"
+  readied 1
+  readied 2
+  readied 3
+  assert_eq '[{"action":"start","issue":1},{"action":"start","issue":2}]' "$(state)" "actions"
+}
+
+test_host_wide_cap_reached_by_other_repos_starts_nothing() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_1 1 2026-11-02T00:00:00Z acme/one),$(run_json run_2 2 2026-11-02T00:00:00Z acme/two),$(run_json run_3 3 2026-11-02T00:00:00Z beta/three),{\"id\":\"run_x\",\"objective\":\"shinfactory stages for app\",\"created_at\":\"2026-11-02T00:00:00Z\"}]"
+  for r in run_1 run_2 run_3; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
+  status=0
+  out=$(FACTORY_MAX_RUNS=3 sf_state "$REPO") || status=$?
+  assert_eq 0 "$status" "exit status"
+  assert_eq '[]' "$out" "actions"
+  assert_not_called "orca orchestration task-list --run run_x --json"
+}
+
+test_host_wide_cap_defaults_to_four() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_1 1 2026-11-02T00:00:00Z acme/one),$(run_json run_2 2 2026-11-02T00:00:00Z acme/two),$(run_json run_3 3 2026-11-02T00:00:00Z beta/three)]"
+  for r in run_1 run_2 run_3; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions with 3 of 4 slots used"
+}
+
+test_open_dependency_holds_instead_of_starting() {
+  world
+  issues "[$(ready_issue_json 7 'Goal\n\n## Depends on\n#3, acme/other#5\n\nParent: #11'),{\"number\":3,\"labels\":[],\"body\":\"\"},{\"number\":11,\"labels\":[],\"body\":\"\"}]"
+  readied 7
+  assert_eq '[{"action":"hold","issue":7,"reason":"depends on open #3"}]' "$(state)" "actions"
+}
+
+test_inline_depends_on_with_closed_issue_starts() {
+  world
+  issues "[$(ready_issue_json 7 'Depends on #3 and #4')]"
+  readied 7
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_paginates_run_list() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[%s],"nextCursor":"c2"}}\n' "$(run_json run_1 1 2026-11-02T00:00:00Z acme/one)" \
+    | fixture orca orchestration run-list --json --full --limit 100
+  printf '{"ok":true,"result":{"runs":[%s]}}\n' "$(run_json run_2 2 2026-11-02T00:00:00Z acme/two)" \
+    | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
+  for r in run_1 run_2; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
+  out=$(FACTORY_MAX_RUNS=2 sf_state "$REPO")
+  assert_eq '[]' "$out" "actions"
+  assert_called "orca orchestration task-list --run run_2 --json"
+}
+
+test_never_calls_the_search_api() {
+  world
+  issues "[$(ready_issue_json 7),$(ready_issue_json 8)]"
+  readied 7
+  readied 8
+  runs "[$(run_json run_a 8)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"number":41,"headRefName":"x/app-8-y"}]'
+  state > /dev/null
+  assert_called "gh issue list -R $REPO --state open --limit 1000 --json number,labels,body"
+  if grep -Eq -- '--label|--search|search/' "$FAKE_LOG"; then
+    fail "search API reached: $(cat "$FAKE_LOG")"
+  fi
+}
+
+test_gh_failure_prints_no_actions_and_exits_non_zero() {
+  world
+  fixture_fail gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: open issues not listed" "stderr"
+}
+
+test_orca_failure_prints_no_actions_and_exits_non_zero() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  fixture_fail orca orchestration run-list --json --full --limit 100
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Orca Runs not listed" "stderr"
+}
+
+test_bad_concurrency_value_is_an_error() {
+  world
+  printf 'factory-concurrency: two\n' > CLAUDE.md
+  status=0
+  sf_state "$REPO" > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "factory-concurrency in CLAUDE.md is not a whole number" "stderr"
+}
