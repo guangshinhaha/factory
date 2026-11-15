@@ -57,7 +57,7 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
      `## Scope`). Fail -> one retry with the exact reason; same rejection twice -> stop.
    - **review** (Codex, cross-model): tier depth (low/medium `/code-review`; high blast-radius +
      interrogate). Posts `Covered:` / `Findings:` as a PR comment. Empty = not run.
-     `shinfactory-cross-model: optional` waives it with "not run: reason" (#240). Max 2 rounds;
+     No Codex access -> skipped automatically with "Codex review not run: <reason>" (Shin, 2026-11-15). Max 2 rounds;
      `Unbuildable:` never reworks.
    - **verify** (high tier only; fresh Opus that never sees builder reasoning): posts verdict JSON
      `{pr, head_sha, verdict, evidence}`. Reruns once per head if missing (#186).
@@ -95,7 +95,7 @@ steer box, brain/meditate, reused foreman session.
 - Point autopilot/orchestrate "Make it enforceable (factory)" notes at the gates.
 
 ## Config (repo CLAUDE.md, next to shinstack-mode)
-`shinfactory-concurrency: 2`, `shinfactory-cross-model: required|optional`, `shinfactory-sensitive: false`.
+`shinfactory-concurrency: 2`, `shinfactory-sensitive: false`.
 
 ## Build order
 0. **Spike by hand.** Push one real issue through with the Orca CLI only (run-create, task-create with
