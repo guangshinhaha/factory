@@ -14,7 +14,7 @@
 #     `shinstack-mode` lines (appended when there are none). A key already present keeps its
 #     value. Missing lines go on branch `factory-init` in a temporary worktree and open a PR;
 #     an open PR from `factory-init` means it waits for that PR. Never pushes the default branch.
-#  3. Orca automation `factory-<name>` (cron every 5 min, claude, prompt /factory:foreman,
+#  3. Orca automation `factory-<owner>/<repo>` (cron every 5 min, claude, prompt /factory:foreman,
 #     precheck sf-tick, in the workspace): created unless one with that name exists.
 #
 # Exit 0: everything is set up, or waits only on the factory-init PR. 1: a step failed; run it
@@ -44,7 +44,6 @@ while [ $# -gt 0 ]; do
 done
 need_jq
 repo=$(resolve_repo "$repo") || exit 2
-name=${repo#*/}
 branch=factory-init
 
 if [ -z "$ws" ]; then
@@ -53,11 +52,16 @@ if [ -z "$ws" ]; then
 fi
 [ -d "$ws" ] || usage_error "workspace [$ws] is not a directory"
 ws=$(cd "$ws" && pwd)
-url=$(git -C "$ws" remote get-url origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
-case "${url%.git}" in
-  */"$repo" | *:"$repo") ;;
-  *) usage_error "workspace [$ws] origin is [$url], not $repo" ;;
-esac
+# Both origin URLs: git push uses the push URL when one is set. GitHub names ignore case.
+lc() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'; }
+for flag in '' --push; do
+  # shellcheck disable=SC2086 # $flag is empty or one word
+  url=$(git -C "$ws" remote get-url $flag origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
+  case "$(lc "${url%.git}")" in
+    */"$(lc "$repo")" | *:"$(lc "$repo")") ;;
+    *) usage_error "workspace [$ws] origin${flag:+ push} URL is [$url], not $repo" ;;
+  esac
+done
 
 # 1. Labels. GitHub label names are case-insensitive.
 have=$(gh label list -R "$repo" --limit 1000 --json name -q '.[].name') \
@@ -95,20 +99,24 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+# A symlink would be read as its target's path and written through to another file.
+links=$(git -C "$ws" ls-tree "origin/$default" -- CLAUDE.md .github/gantry-risky-paths | awk '$1 == "120000" { printf "%s ", $4 }')
+[ -z "$links" ] || die "${links% } on $default is a symlink; add the factory lines to the file it points at"
 git -C "$ws" show "origin/$default:.github/gantry-risky-paths" > "$tmp/risky" 2> /dev/null || : > "$tmp/risky"
 git -C "$ws" show "origin/$default:CLAUDE.md" > "$tmp/claude" 2> /dev/null || : > "$tmp/claude"
 for f in "$tmp/risky" "$tmp/claude"; do
   [ ! -s "$f" ] || [ -z "$(tail -c 1 "$f")" ] || echo >> "$f"
 done
 
-# Lines missing from each file; a CLAUDE.md key counts as present whatever its value.
+# Lines missing from each file; a CLAUDE.md key counts as present whatever its value or
+# indent (sf-state and sf-ship read indented keys too).
 : > "$tmp/risky.add"
 for p in lefthook.yml '.github/workflows/**'; do
   sed 's/#.*//; s/[[:space:]]*$//; s/^[[:space:]]*//' "$tmp/risky" | grep -Fxq -- "$p" || echo "$p" >> "$tmp/risky.add"
 done
 : > "$tmp/claude.add"
-grep -Eq '^factory-concurrency:' "$tmp/claude" || echo 'factory-concurrency: 2' >> "$tmp/claude.add"
-grep -Eq '^factory-sensitive:' "$tmp/claude" || echo 'factory-sensitive: false' >> "$tmp/claude.add"
+grep -Eq '^[[:space:]]*factory-concurrency:' "$tmp/claude" || echo 'factory-concurrency: 2' >> "$tmp/claude.add"
+grep -Eq '^[[:space:]]*factory-sensitive:' "$tmp/claude" || echo 'factory-sensitive: false' >> "$tmp/claude.add"
 
 if [ ! -s "$tmp/risky.add" ] && [ ! -s "$tmp/claude.add" ]; then
   echo "$me: gantry-risky-paths and CLAUDE.md already set up on $default"
@@ -126,9 +134,9 @@ else
       cat "$tmp/risky" "$tmp/risky.add" > "$wt/.github/gantry-risky-paths"
     fi
     if [ -s "$tmp/claude.add" ]; then
-      if grep -q '^shinstack-mode' "$tmp/claude"; then
+      if grep -q '^[[:space:]]*shinstack-mode' "$tmp/claude"; then
         # After the last shinstack-mode line.
-        last=$(grep -n '^shinstack-mode' "$tmp/claude" | tail -n 1 | cut -d: -f1)
+        last=$(grep -n '^[[:space:]]*shinstack-mode' "$tmp/claude" | tail -n 1 | cut -d: -f1)
         { head -n "$last" "$tmp/claude"; cat "$tmp/claude.add"; tail -n +"$((last + 1))" "$tmp/claude"; } > "$wt/CLAUDE.md"
       else
         { if [ -s "$tmp/claude" ]; then cat "$tmp/claude" && echo; fi && cat "$tmp/claude.add"; } > "$wt/CLAUDE.md"
@@ -155,7 +163,7 @@ else
 fi
 
 # 3. The Orca automation.
-auto=factory-$name
+auto=factory-$repo
 orca automations list --json > "$tmp/autos" || die "Orca automations not listed (orca automations list failed)"
 found=$(jq -r --arg n "$auto" '
   .result | if type == "object" and (.automations | type) == "array" then .automations else error("no automations") end

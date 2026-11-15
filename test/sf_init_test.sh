@@ -33,7 +33,7 @@ world() {
   open_pr ""
   echo "$PR_URL" | fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file -
   automations '[]'
-  echo '{"ok":true}' | fixture orca automations create --name factory-app --trigger '*/5 * * * *' --provider claude \
+  echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
     --prompt /factory:foreman --precheck sf-tick --workspace "path:$WS" --json
 }
 seed_commit() {
@@ -91,7 +91,7 @@ needs-shin
 icebox
 risk:high"
   open_pr "$PR_URL"
-  automations '[{"id":"a1","name":"factory-app"}]'
+  automations '[{"id":"a1","name":"factory-acme/app"}]'
   branch_before=$(git -C "$ORIGIN" rev-parse factory-init)
   : > "$FAKE_LOG"
   sf_init > "$TEST_TMP/out"
@@ -106,7 +106,7 @@ test_run_after_the_pr_merged_writes_nothing() {
 needs-shin
 icebox
 risk:high"
-  automations '[{"id":"a1","name":"factory-app"}]'
+  automations '[{"id":"a1","name":"factory-acme/app"}]'
   mkdir -p "$TEST_TMP/seed/.github"
   printf '# mine\nskills/**\nlefthook.yml  # checks\n.github/workflows/**\n' > "$TEST_TMP/seed/.github/gantry-risky-paths"
   printf 'shinstack-mode: auto\nfactory-concurrency: 2\nfactory-sensitive: false\n' > "$TEST_TMP/seed/CLAUDE.md"
@@ -136,7 +136,7 @@ lefthook.yml
 shinstack-mode.merge: ask
 factory-sensitive: false
 factory-concurrency: 4" "$(remote_file factory-init CLAUDE.md)" "CLAUDE.md"
-  assert_eq 1 "$(count_calls "orca automations create --name factory-app ")" "automation creates"
+  assert_eq 1 "$(count_calls "orca automations create --name factory-acme/app ")" "automation creates"
 }
 
 test_claude_md_without_shinstack_mode_gets_the_keys_appended() {
@@ -210,10 +210,10 @@ test_default_workspace_is_the_main_checkout() {
   world
   git -C "$WS" worktree add -q --detach "$TEST_TMP/side"
   main=$(git -C "$WS" worktree list --porcelain | sed -n '1s/^worktree //p')
-  echo '{"ok":true}' | fixture orca automations create --name factory-app --trigger '*/5 * * * *' --provider claude \
+  echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
     --prompt /factory:foreman --precheck sf-tick --workspace "path:$main" --json
   (cd "$TEST_TMP/side" && sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO") > /dev/null
-  assert_called "orca automations create --name factory-app --trigger */5 * * * * --provider claude --prompt /factory:foreman --precheck sf-tick --workspace path:$main --json"
+  assert_called "orca automations create --name factory-acme/app --trigger */5 * * * * --provider claude --prompt /factory:foreman --precheck sf-tick --workspace path:$main --json"
 }
 
 test_bad_arguments_exit_2() {
@@ -222,4 +222,59 @@ test_bad_arguments_exit_2() {
   sf_init --bogus > /dev/null 2>&1 || status=$?
   assert_eq 2 "$status" "exit status"
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
+}
+
+# sf-state and sf-ship read indented keys, so an indented key is present.
+test_indented_key_keeps_its_value() {
+  world
+  printf 'shinstack-mode: auto\n\n## Factory\n  factory-concurrency: 4\n' > "$TEST_TMP/seed/CLAUDE.md"
+  seed_commit
+  sf_init > /dev/null
+  assert_eq "shinstack-mode: auto
+factory-sensitive: false
+
+## Factory
+  factory-concurrency: 4" "$(remote_file factory-init CLAUDE.md)" "CLAUDE.md"
+}
+
+test_origin_url_case_is_ignored() {
+  world
+  git -C "$WS" remote set-url origin "$TEST_TMP/remote/Acme/App.git"
+  mv "$TEST_TMP/remote/acme" "$TEST_TMP/remote/Acme"
+  mv "$TEST_TMP/remote/Acme/app.git" "$TEST_TMP/remote/Acme/App.git"
+  ORIGIN=$TEST_TMP/remote/Acme/App.git
+  sf_init > /dev/null
+  assert_eq 1 "$(count_calls "gh pr create")" "PRs"
+}
+
+test_push_url_of_another_repo_exits_2_without_writes() {
+  world
+  git init -q --bare "$TEST_TMP/remote/acme/evil.git"
+  git -C "$WS" remote set-url --push origin "$TEST_TMP/remote/acme/evil.git"
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 2 "$status" "exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "origin push URL is"
+  assert_eq "" "$(git -C "$TEST_TMP/remote/acme/evil.git" for-each-ref)" "refs in the other repo"
+  assert_eq 0 "$(count_calls "gh ")" "gh calls"
+}
+
+# The name carries the owner, so other/app's automation is not acme/app's.
+test_automation_of_a_same_named_repo_does_not_count() {
+  world
+  automations '[{"id":"a1","name":"factory-other/app"}]'
+  sf_init > /dev/null
+  assert_eq 1 "$(count_calls "orca automations create --name factory-acme/app ")" "automation creates"
+}
+
+test_symlinked_claude_md_exits_1_naming_it() {
+  world
+  mv "$TEST_TMP/seed/CLAUDE.md" "$TEST_TMP/seed/AGENTS.md"
+  ln -s AGENTS.md "$TEST_TMP/seed/CLAUDE.md"
+  seed_commit
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "CLAUDE.md on main is a symlink"
+  assert_eq 0 "$(count_calls "gh pr create")" "PRs"
 }
