@@ -1,0 +1,62 @@
+#!/bin/sh
+# sf-stop: the factory's only failure exit for an issue. Comments
+# `factory: stopped. <reason>` with a stop marker, then swaps `ready` for `needs-shin`.
+# Usage: sf-stop [--repo owner/repo] <issue> <reason>
+#
+# Idempotent: a stop marker already on the issue since its last `ready` label means the comment
+# is not posted again, and labels already right are not edited. The comment goes first, so a
+# failure after it leaves the issue `ready` and the next sf-state still owes this stop; the next
+# run then only fixes the labels.
+#
+# Exit 0: the issue is stopped (now or already). 1: a step failed; run it again.
+# 2: bad arguments, or jq missing.
+set -u
+
+me=sf-stop
+# shellcheck source=lib/factory.sh
+. "$(cd "$(dirname "$0")/.." && pwd)/lib/factory.sh"
+
+repo=
+if [ "${1:-}" = --repo ]; then
+  [ $# -ge 2 ] || usage_error "--repo needs owner/repo"
+  repo=$2
+  shift 2
+fi
+[ $# -eq 2 ] || usage_error "usage: sf-stop [--repo owner/repo] <issue> <reason>"
+issue=$1
+reason=$2
+is_number "$issue" || usage_error "issue [$issue] is not a number"
+[ -n "$reason" ] || usage_error "reason is empty"
+need_jq
+repo=$(resolve_repo "$repo") || exit 2
+
+marks=$(markers_since_ready "$repo" "$issue") || die "timeline of #$issue not read (gh api failed)"
+
+if printf '%s\n' "$marks" | jq -e 'any(.[]; .kind == "stop")' > /dev/null; then
+  echo "$me: #$issue already has a stop comment since it was last labelled ready"
+else
+  printf 'factory: stopped. %s\n\n<!-- factory:{"kind":"stop"} -->\n' "$reason" \
+    | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
+    || die "stop comment not posted on #$issue (gh issue comment failed)"
+  echo "$me: posted stop comment on #$issue"
+fi
+
+labels=$(gh issue view "$issue" -R "$repo" --json labels -q '[.labels[].name] | join(",")') \
+  || die "labels of #$issue not read (gh issue view failed)"
+case ",$labels," in
+  *,ready,*) has_ready=1 ;;
+  *) has_ready=0 ;;
+esac
+case ",$labels," in
+  *,needs-shin,*) has_shin=1 ;;
+  *) has_shin=0 ;;
+esac
+
+if [ "$has_ready" = 1 ] || [ "$has_shin" = 0 ]; then
+  set --
+  [ "$has_shin" = 1 ] || set -- "$@" --add-label needs-shin
+  [ "$has_ready" = 0 ] || set -- "$@" --remove-label ready
+  gh issue edit "$issue" -R "$repo" "$@" > /dev/null \
+    || die "#$issue still labelled [$labels] (gh issue edit failed)"
+fi
+echo "$me: #$issue stopped (needs-shin)"
