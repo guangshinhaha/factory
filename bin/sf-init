@@ -4,7 +4,7 @@
 # Usage: sf-init [--repo owner/repo] [--workspace <path>]
 #   --repo       the GitHub repo (default: the current directory's repo)
 #   --workspace  the repo's main checkout, where the automation runs (default: the main worktree
-#                of the current directory's git repo). Its `origin` must be the repo.
+#                of the current directory's git repo). Its `origin` must be the repo on github.com.
 #
 # Steps, in order:
 #  1. Labels `ready`, `needs-shin`, `icebox`, `risk:high`: creates the missing ones.
@@ -13,7 +13,8 @@
 #     `factory-concurrency: 2` / `factory-sensitive: false` in CLAUDE.md after the
 #     `shinstack-mode` lines (appended when there are none). A key already present keeps its
 #     value. Missing lines go on branch `factory-init` in a temporary worktree and open a PR;
-#     an open PR from `factory-init` means it waits for that PR. Never pushes the default branch.
+#     an open PR from this repo's `factory-init` (not a fork's) means it waits for that PR.
+#     Never pushes the default branch, and runs none of the repo's git hooks (see below).
 #  3. Orca automation `factory-<owner>/<repo>` (cron every 5 min, claude, prompt /factory:foreman,
 #     precheck sf-tick, in the workspace): created unless one with that name exists.
 #
@@ -53,16 +54,43 @@ fi
 [ -d "$ws" ] || usage_error "workspace [$ws] is not a directory"
 # git's own form of the path (C:/... on Windows), which native tools like orca read too.
 ws=$(git -C "$ws" rev-parse --show-toplevel 2> /dev/null) || usage_error "workspace [$ws] is not a git checkout"
-# Both origin URLs: git push uses the push URL when one is set. GitHub names ignore case.
+# Every origin URL must be github.com/<repo>: git push uses the push URLs when any are set, and
+# pushes to each of them. GitHub names ignore case.
 lc() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'; }
-for flag in '' --push; do
+urls=
+for kind in fetch push; do
+  flag=
+  [ "$kind" = fetch ] || flag=--push
   # shellcheck disable=SC2086 # $flag is empty or one word
-  url=$(git -C "$ws" remote get-url $flag origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
-  case "$(lc "${url%.git}")" in
-    */"$(lc "$repo")" | *:"$(lc "$repo")") ;;
-    *) usage_error "workspace [$ws] origin${flag:+ push} URL is [$url], not $repo" ;;
-  esac
+  u=$(git -C "$ws" remote get-url --all $flag origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
+  urls="$urls$(printf '%s\n' "$u" | sed "s/^/$kind /")
+"
 done
+while read -r kind url; do
+  [ -n "$kind" ] || continue
+  u=$(lc "$url")
+  u=${u%/}
+  u=${u%.git}
+  case "$u" in
+    *://*) # scheme://[user@]host[:port]/owner/repo
+      u=${u#*://}
+      host=${u%%/*}
+      path=${u#*/}
+      ;;
+    *:*) # git's scp form [user@]host:owner/repo; a slash before the colon makes it a path
+      host=${u%%:*}
+      path=${u#*:}
+      case "$host" in */*) host= ;; esac
+      ;;
+    *) host='' path='' ;;
+  esac
+  host=${host##*@}
+  if [ "${host%:*}" != github.com ] || [ "${path#/}" != "$(lc "$repo")" ]; then
+    usage_error "workspace [$ws] origin$([ "$kind" = fetch ] || echo " $kind") URL is [$url], not github.com/$repo"
+  fi
+done << EOF
+$urls
+EOF
 
 # 1. Labels. GitHub label names are case-insensitive.
 have=$(gh label list -R "$repo" --limit 1000 --json name -q '.[].name') \
@@ -89,8 +117,6 @@ default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name
   || die "default branch of $repo not read (gh repo view failed)"
 [ -n "$default" ] || die "default branch of $repo is empty (gh repo view)"
 [ "$default" != "$branch" ] || die "default branch of $repo is $branch, the branch sf-init pushes"
-git -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
-  || die "origin/$default not fetched in $ws (git fetch failed)"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-init.XXXXXX") || die "temp dir not created"
 wt=
@@ -100,6 +126,14 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+# The repo's hooks need its deps (node_modules and the like), which the temporary worktree lacks,
+# so they would fail every run. The only commit is the factory lines written here, and it lands
+# through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks.
+nohooks=$tmp/no-hooks
+mkdir "$nohooks" || die "temp dir not created"
+
+git -c core.hooksPath="$nohooks" -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
+  || die "origin/$default not fetched in $ws (git fetch failed)"
 
 # Blobs by id, never `git show <ref>:<path>`: Git Bash rewrites that argument as a path list.
 tree=$(git -C "$ws" ls-tree "origin/$default" -- CLAUDE.md .github/gantry-risky-paths) \
@@ -135,13 +169,18 @@ grep -Eq '^[[:space:]]*factory-sensitive:' "$tmp/claude" || echo 'factory-sensit
 if [ ! -s "$tmp/risky.add" ] && [ ! -s "$tmp/claude.add" ]; then
   echo "$me: gantry-risky-paths and CLAUDE.md already set up on $default"
 else
-  pr=$(gh pr list -R "$repo" --head "$branch" --state open --json url -q '.[0].url // ""') \
+  gh pr list -R "$repo" --head "$branch" --state open --json url,isCrossRepository > "$tmp/prs" \
     || die "open PRs from $branch not read (gh pr list failed)"
+  # A fork's PR can come from a branch with the same name; it is not the setup PR.
+  pr=$(jq -nr 'input |
+    if type == "array" and all(.[]; (.url | type == "string") and (.isCrossRepository | type == "boolean"))
+    then [.[] | select(.isCrossRepository == false)][0].url // "" else error("no PR array") end' "$tmp/prs" 2> /dev/null) \
+    || die "open PRs from $branch not read (gh pr list printed no array of PRs with url and isCrossRepository)"
   if [ -n "$pr" ]; then
     echo "$me: file changes wait on $pr"
   else
     wt=$tmp/wt
-    git -C "$ws" worktree add -q --detach "$wt" "origin/$default" > /dev/null 2>&1 \
+    git -c core.hooksPath="$nohooks" -C "$ws" worktree add -q --detach "$wt" "origin/$default" > /dev/null 2>&1 \
       || { wt=; die "worktree for $branch not created in $ws (git worktree add failed)"; }
     if [ -s "$tmp/risky.add" ]; then
       mkdir -p "$wt/.github"
@@ -157,14 +196,14 @@ else
       fi
     fi
     { git -C "$wt" add -A -- .github/gantry-risky-paths CLAUDE.md \
-      && git -C "$wt" commit -q -m "chore: set up the factory (sf-init)"; } \
+      && git -c core.hooksPath="$nohooks" -C "$wt" commit -q -m "chore: set up the factory (sf-init)"; } \
       || die "factory setup not committed on $branch (git commit failed)"
     # The branch is the factory's own: replace a stale one from a closed PR, but only the copy
     # seen just now, so a concurrent push is not lost.
     old=$(git -C "$ws" ls-remote origin "refs/heads/$branch") \
       || die "remote $branch not read (git ls-remote failed)"
     old=$(printf '%s\n' "$old" | cut -f1)
-    git -C "$wt" push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" \
+    git -c core.hooksPath="$nohooks" -C "$wt" push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" \
       || die "$branch not pushed to origin (git push failed)"
     printf '%s\n' "sf-init sets this repo up for the factory." "" \
       "- \`.github/gantry-risky-paths\`: lefthook.yml and .github/workflows/** need a human review, so an agent can't quietly weaken a check." \
