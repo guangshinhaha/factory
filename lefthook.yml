@@ -9,3 +9,10 @@ remotes:
       # - hooks/node.yml   # no package.json: POSIX sh repo
       # - hooks/prisma.yml
       # - hooks/nextjs.yml
+
+# Repo-only checks.
+pre-push:
+  commands:
+    factory-check:
+      run: sh scripts/check
+      fail_text: "scripts/check failed (shellcheck or tests). Fix it; never push with --no-verify."

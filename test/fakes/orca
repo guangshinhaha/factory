@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake orca for tests: replays fixtures and logs every call (see fake-cli).
+exec sh "$(dirname "$0")/fake-cli" orca "$@"

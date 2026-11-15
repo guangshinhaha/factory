@@ -1,0 +1,32 @@
+#!/bin/sh
+# Every check this repo owns: shellcheck on all shell scripts, then the tests.
+# Runs in lefthook pre-push and in CI. Usage: scripts/check
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+if ! command -v shellcheck > /dev/null 2>&1; then
+  echo "check: shellcheck not found on PATH (brew, apt or choco install shellcheck)" >&2
+  exit 1
+fi
+
+# Shell scripts are *.sh files and files whose first line is a sh shebang
+# (#!/bin/sh or #!/usr/bin/env sh).
+list=$(mktemp "${TMPDIR:-/tmp}/factory-check.XXXXXX")
+files=$(mktemp "${TMPDIR:-/tmp}/factory-check.XXXXXX")
+trap 'rm -f "$list" "$files"' EXIT
+find bin scripts test -type f > "$files"
+sort "$files" | while IFS= read -r f; do
+  case "$f" in
+    *.sh) echo "$f" ;;
+    *) if head -n 1 "$f" | grep -Eq '^#! ?(/bin/sh|/usr/bin/env sh)([[:space:]]|$)'; then echo "$f"; fi ;;
+  esac
+done > "$list"
+
+echo "shellcheck: $(wc -l < "$list" | tr -d ' ') files"
+# shellcheck disable=SC2046 # repo paths have no spaces; word splitting is intended
+shellcheck -x -s sh $(cat "$list")
+
+echo "tests:"
+test/run
