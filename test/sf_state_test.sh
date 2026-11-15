@@ -468,3 +468,93 @@ test_task_list_with_null_tasks_is_an_error() {
   assert_eq '' "$out" "stdout"
   assert_contains "$(cat "$TEST_TMP/err")" "sf-state: tasks of Run run_a not listed" "stderr"
 }
+
+# Interrogate findings on the #18 fix: created_at is checked on every Run, not only empty ones.
+bad_created_at_fails() {
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: actions not computed: Run run_a created_at [$1] is not a UTC ISO-8601 time" "stderr"
+}
+
+test_run_with_tasks_and_no_created_at_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs '[{"id":"run_a","objective":"factory acme/app#7"}]'
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  bad_created_at_fails ''
+}
+
+test_run_with_tasks_and_unparseable_created_at_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7 yesterday)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  bad_created_at_fails yesterday
+}
+
+test_run_created_at_with_an_offset_is_an_error() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"labeled","label":{"name":"needs-shin"},"created_at":"2026-11-03T05:00:00Z"},{"event":"unlabeled","label":{"name":"needs-shin"},"created_at":"2026-11-04T00:00:00Z"}]'
+  runs "[$(run_json run_a 7 2026-11-03T08:00:00+08:00)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  bad_created_at_fails 2026-11-03T08:00:00+08:00
+}
+
+# A non-ready issue has no history cut-off: its newest Run is current until needs-shin follows it.
+test_unreadied_issue_dead_run_from_before_a_re_ready_owes_a_stop() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"},{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-04T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-05T00:00:00Z"}]'
+  runs "[$(run_json run_a 7 2026-11-02T00:00:00Z)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+}
+
+# fails_with <stderr text>: sf-state exits 1, prints nothing on stdout, and says why.
+fails_with() {
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "$1" "stderr"
+}
+
+test_task_without_an_id_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"status":"ready","title":"review"},null]'
+  fails_with "sf-state: tasks of Run run_a not listed"
+}
+
+test_pr_without_a_number_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"headRefName":"someone/app-7-x"}]'
+  fails_with "sf-state: open PRs not listed"
+}
+
+test_ready_label_event_without_a_time_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"}},$(comment "$attempt" 2026-10-01T00:00:00Z)]"
+  fails_with "sf-state: timeline of #7 has a ready label event with no UTC time"
+}
+
+test_run_list_repeating_its_cursor_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
+  fails_with "sf-state: Orca Runs not listed: run-list repeated cursor [c2]"
+}
