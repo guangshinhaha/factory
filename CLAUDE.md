@@ -27,7 +27,7 @@ A task is done only when the pre-push checks pass. Never use `--no-verify`.
 If the shinstack plugin (github.com/guangshinhaha/shinstack) is installed, follow `shinstack:craft`, which its session hook loads. If it isn't installed, ignore this section.
 
 ## shinstack
-shinstack-mode: supervised
+shinstack-mode: auto
 
 ## Review rules
 

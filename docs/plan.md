@@ -117,9 +117,12 @@ steer box, brain/meditate, reused foreman session.
 - re-readying a stopped issue starts a fresh attempt count;
 - the Go loop is not running anywhere.
 
+## Decided after v2 (Shin, 2026-11-15)
+- Sensitive repos may run on Orca (drops shinfactory#57's rule). `shinfactory-sensitive: true` still keeps review on the same provider with synthetic data.
+- This repo runs `shinstack-mode: auto`.
+- After cutover, keep shinfactory open until its open issues are triaged, then archive it.
+
 ## Open
-- Does "no Orca on sensitive repos" (shinfactory#57) still hold? If yes, sensitive repos stay off the
-  factory. Doesn't block the build.
 - Spike answers (step 0) may change the foreman design.
 
 ## Advisor review (Fable, 2026-11-15): applied
