@@ -37,7 +37,17 @@ issues() { printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --
 prs() { printf '%s\n' "$1" | jq -c 'map(if type == "object" and (has("isCrossRepository") | not) then . + {isCrossRepository: false} else . end)' | prs_raw; }
 prs_raw() { fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName,isCrossRepository; }
 runs() { printf '{"ok":true,"result":{"runs":%s,"nextCursor":null}}\n' "$1" | fixture orca orchestration run-list --json --full --limit 100; }
-tasks() { printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orca orchestration task-list --run "$1" --json; }
+# tasks <run> <json>: the Run's tasks, and an empty inbox (inbox_of sets escalations).
+tasks() {
+  printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orca orchestration task-list --run "$1" --json
+  inbox_of "$1" '[]'
+}
+inbox_of() { printf '{"ok":true,"result":{"messages":%s,"count":0}}\n' "$2" | fixture orca orchestration inbox --terminal "run:$1" --limit 500 --json --full; }
+# escalation <task> <dispatch> <created_at>: Orca's "stopped without reporting" message.
+escalation() {
+  jq -cn --arg t "$1" --arg d "$2" --arg at "$3" \
+    '{type: "escalation", subject: "Worker stopped without reporting", payload: ({taskId: $t, dispatchId: $d, stopReason: "finished"} | tojson), created_at: $at}'
+}
 timeline() { printf '%s\n' "$2" | fixture gh api "repos/$REPO/issues/$1/timeline" --paginate; }
 
 # ready_issue <n> [body]: an open issue labelled ready, readied at 2026-11-01, no comments.
@@ -130,16 +140,16 @@ test_dead_run_without_hold_owes_a_stop_and_is_never_started() {
   readied 7
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"failed","title":"build"},{"id":"t2","status":"pending","title":"review"}]'
-  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed","run":"run_a","task":"t1"}]' "$(state)" "actions"
 }
 
-test_run_with_no_tasks_owes_a_stop() {
+test_dead_run_with_no_tasks_is_skipped_and_the_issue_starts_again() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
   runs "[$(run_json run_a 7)]"
   tasks run_a '[]'
-  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a has no tasks"}]' "$(state)" "actions"
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
 }
 
 test_dead_run_with_expired_hold_restarts_the_failed_task() {
@@ -157,7 +167,7 @@ test_hold_consumed_by_a_restart_no_longer_applies() {
   timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"hold\",\"provider\":\"claude\",\"reset\":\"2001-01-01T00:00:00Z\"} -->' 2026-11-01T01:00:00Z),$(comment '<!-- factory:{\"kind\":\"restart\"} -->' 2026-11-01T02:00:00Z)]"
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t2","status":"failed","title":"review"}]'
-  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task review failed"}]' "$(state)" "actions"
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task review failed","run":"run_a","task":"t2"}]' "$(state)" "actions"
 }
 
 test_unexpired_hold_waits_and_blocks_every_start_in_the_repo() {
@@ -432,7 +442,7 @@ test_dead_run_on_unreadied_issue_owes_a_stop() {
   timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"}]'
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
-  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed","run":"run_a","task":"t1"}]' "$(state)" "actions"
 }
 
 test_dead_run_already_stopped_owes_nothing_after_needs_shin_is_removed() {
@@ -534,7 +544,7 @@ test_unreadied_issue_dead_run_from_before_a_re_ready_owes_a_stop() {
   timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"},{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-04T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-05T00:00:00Z"}]'
   runs "[$(run_json run_a 7 2026-11-02T00:00:00Z)]"
   tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
-  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed","run":"run_a","task":"t1"}]' "$(state)" "actions"
 }
 
 # fails_with <stderr text>: sf-state exits 1, prints nothing on stdout, and says why.
@@ -623,4 +633,70 @@ test_task_list_with_a_bad_document_before_a_good_one_is_an_error() {
   runs "[$(run_json run_a 7)]"
   printf '{"ok":false,"result":{"tasks":[]}}\n{"ok":true,"result":{"tasks":[{"id":"t1","status":"dispatched","title":"build"}]}}\n' | fixture orca orchestration task-list --run run_a --json
   fails_with "sf-state: tasks of Run run_a not listed"
+}
+
+nudge_marker() { comment "<!-- factory:{\\\"kind\\\":\\\"nudge\\\",\\\"dispatch\\\":\\\"$1\\\"} -->" "$2"; }
+
+test_worker_stopped_without_reporting_is_nudged_once() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
+  inbox_of run_a "[$(escalation t1 ctx_1 2026-11-02T01:00:00Z),$(escalation t9 ctx_9 2026-11-02T01:00:00Z)]"
+  assert_eq '[{"action":"nudge","issue":7,"run":"run_a","task":"t1","dispatch":"ctx_1"}]' "$(state)" "actions"
+}
+
+test_nudged_worker_that_has_not_stopped_again_needs_nothing() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(nudge_marker ctx_1 2026-11-02T01:05:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
+  inbox_of run_a "[$(escalation t1 ctx_1 2026-11-02T01:00:00Z)]"
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_worker_stopped_again_after_a_nudge_owes_a_stop() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(nudge_marker ctx_1 2026-11-02T01:05:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
+  inbox_of run_a "[$(escalation t1 ctx_1 2026-11-02T01:00:00Z),$(escalation t1 ctx_1 2026-11-02T01:10:00Z)]"
+  assert_eq '[{"action":"stop","issue":7,"run":"run_a","task":"t1","dispatch":"ctx_1","reason":"verify worker stopped without reporting, again after a nudge"}]' "$(state)" "actions"
+}
+
+test_a_new_dispatch_of_the_task_gets_its_own_nudge() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(nudge_marker ctx_1 2026-11-02T01:05:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
+  inbox_of run_a "[$(escalation t1 ctx_1 2026-11-02T01:00:00Z),$(escalation t1 ctx_2 2026-11-02T02:00:00Z)]"
+  assert_eq '[{"action":"nudge","issue":7,"run":"run_a","task":"t1","dispatch":"ctx_2"}]' "$(state)" "actions"
+}
+
+test_failed_inbox_read_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
+  fixture orca orchestration inbox --terminal run:run_a --limit 500 --json --full < /dev/null
+  fixture_exit 1 "boom"
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq "" "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "inbox of Run run_a not read" "stderr"
+}
+
+test_closed_issue_live_run_advances_only_debrief_and_lessons() {
+  world
+  issues '[]'
+  runs "[$(run_json run_a 7),$(run_json run_b 8)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"debrief"}]'
+  tasks run_b '[{"id":"t1","status":"ready","title":"review"}]'
+  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
 }

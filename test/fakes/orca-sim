@@ -1,0 +1,147 @@
+#!/bin/sh
+# shellcheck disable=SC2016 # jq programs in single quotes
+# A stateful fake orca for multi-fire tests (sf-act, sf-tick). Not on PATH by itself: a test puts
+# an `orca` wrapper that execs it in front of test/fakes. State: $ORCA_SIM/state.json.
+# Logs every call to $FAKE_LOG like fake-cli ("orca <args...>").
+#
+# Runs and tasks behave like Orca's: a task is ready when all its deps are completed, else
+# pending; completing a task promotes its dependents. worker-start dispatches a task; the test
+# finishes the worker with test helpers that edit the state (see test/sf_act_test.sh).
+# As in Orca, the concise task-list `title` is the display name when one was given.
+# `orca worktree create` adds a real git worktree; `orca terminal create` is only recorded.
+#
+# Failure injection: when $ORCA_SIM/fail/<command> exists (e.g. fail/task-create), that command
+# prints the file to stderr and exits 1. fail/<command>.after holds a count of calls to let
+# through first.
+set -u
+
+[ -n "${FAKE_LOG:-}" ] && printf '%s\n' "orca $*" >> "$FAKE_LOG"
+st=$ORCA_SIM/state.json
+[ -f "$st" ] || echo '{"n":0,"runs":[],"tasks":[],"dispatches":[],"inbox":{},"sent":[],"terminals":[]}' > "$st"
+
+ok() { echo '{"ok":true,"result":{}}'; }
+die() { echo "orca-sim: $*" >&2; exit 1; }
+# upd <jq filter> [jq args...]: rewrite the state.
+upd() {
+  f=$1
+  shift
+  jq "$@" "$f" "$st" > "$st.new" && mv "$st.new" "$st"
+}
+
+group=$1
+shift
+[ "$group" = orchestration ] || [ "$group" = worktree ] || [ "$group" = terminal ] || die "unknown command group $group"
+cmd=$1
+shift
+
+if [ -f "$ORCA_SIM/fail/$cmd" ]; then
+  after=$(cat "$ORCA_SIM/fail/$cmd.after" 2> /dev/null || echo 0)
+  if [ "$after" -gt 0 ]; then
+    echo $((after - 1)) > "$ORCA_SIM/fail/$cmd.after"
+  else
+    cat "$ORCA_SIM/fail/$cmd" >&2
+    exit 1
+  fi
+fi
+
+# Flags into $flags (JSON object); --json, --full and --no-parent take no value.
+flags='{}'
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json | --full | --no-parent) flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" '.[$k] = true') ;;
+    --*)
+      [ $# -ge 2 ] || die "$1 needs a value"
+      flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" --arg v "$2" '.[$k] = $v')
+      shift
+      ;;
+    *) die "unexpected argument $1" ;;
+  esac
+  shift
+done
+fl() { printf '%s' "$flags" | jq -r --arg k "$1" '.[$k] // empty'; }
+
+# Pending tasks whose deps are all completed turn ready.
+PROMOTE='def promote: .tasks as $all | .tasks |= map(if .status == "pending" and all(.deps[]; . as $d | any($all[]; .id == $d and .status == "completed")) then .status = "ready" else . end);'
+
+case "$cmd" in
+  run-create)
+    upd '.n += 1 | .runs += [{id: "run_\(.n)", objective: $o, created_at: (now | todate)}]' --arg o "$(fl objective)"
+    jq -c '{ok: true, result: {runId: .runs[-1].id}}' "$st"
+    ;;
+  run-use)
+    jq -e --arg r "$(fl id)" 'any(.runs[]; .id == $r)' "$st" > /dev/null || die "run not found: $(fl id)"
+    ok
+    ;;
+  run-list)
+    jq -c '{ok: true, result: {runs: .runs, nextCursor: null}}' "$st"
+    ;;
+  task-list)
+    if [ "$(fl full)" = true ]; then
+      jq -c --arg r "$(fl run)" '{ok: true, result: {tasks: [.tasks[] | select(.run == $r)
+        | {id, task_title: .title, display_name: .display, deps: (.deps | tojson), status, result}]}}' "$st"
+    else
+      jq -c --arg r "$(fl run)" '{ok: true, result: {tasks: [.tasks[] | select(.run == $r) | {id, title: (if .display != "" then .display else .title end), status}], runId: $r}}' "$st"
+    fi
+    ;;
+  task-create)
+    spec=''
+    [ "$(fl spec-file)" = - ] && spec=$(cat)
+    jq -e --arg r "$(fl run)" 'any(.runs[]; .id == $r)' "$st" > /dev/null || die "run not found: $(fl run)"
+    upd "$PROMOTE"'.n += 1 | .tasks += [{id: "task_\(.n)", run: $r, title: $t, display: $d, deps: ($deps | fromjson), status: "pending", result: null, spec: $s}] | promote' \
+      --arg r "$(fl run)" --arg t "$(fl task-title)" --arg d "$(fl display-name)" --arg deps "$(fl deps)" --arg s "$spec"
+    jq -c '{ok: true, result: {taskId: .tasks[-1].id}}' "$st"
+    ;;
+  task-update)
+    jq -e --arg t "$(fl id)" 'any(.tasks[]; .id == $t)' "$st" > /dev/null || die "task not found: $(fl id)"
+    upd "$PROMOTE"'.tasks |= map(if .id == $t then .status = $s | (if $res != "" then .result = $res else . end) else . end) | promote' \
+      --arg t "$(fl id)" --arg s "$(fl status)" --arg res "$(fl result)"
+    ok
+    ;;
+  worker-start)
+    jq -e --arg t "$(fl task)" 'any(.tasks[]; .id == $t and .status == "ready")' "$st" > /dev/null || die "task not ready: $(fl task)"
+    upd '.n += 1 | .dispatches += [{id: "ctx_\(.n)", task: $t, agent: $a, model: $m, worktree: $w}] | .tasks |= map(if .id == $t then .status = "dispatched" else . end)' \
+      --arg t "$(fl task)" --arg a "$(fl agent)" --arg m "$(fl model)" --arg w "$(fl worktree)"
+    jq -c '{ok: true, result: {dispatchId: .dispatches[-1].id}}' "$st"
+    ;;
+  worker-stop)
+    upd '.dispatches |= map(if .id == $d then .liveness = "exited" | .stopped = true else . end)' --arg d "$(fl dispatch)"
+    ok
+    ;;
+  worker-show)
+    # A dispatch is exited unless a test set its liveness (sim_set); no such dispatch fails.
+    jq -c --arg d "$(fl dispatch)" '[.dispatches[] | select(.id == $d)] | first as $w
+      | if $w then {ok: true, result: {dispatchId: $w.id, liveness: ($w.liveness // "exited")}} else {ok: false} end' "$st"
+    jq -e --arg d "$(fl dispatch)" 'any(.dispatches[]; .id == $d)' "$st" > /dev/null || exit 1
+    ;;
+  dispatch-show)
+    jq -c --arg t "$(fl task)" '[.dispatches[] | select(.task == $t)] | last as $d
+      | if $d then {ok: true, result: {dispatch: {id: $d.id}}} else {ok: false} end' "$st"
+    ;;
+  worker-read)
+    if [ -f "$ORCA_SIM/terminal/$(fl dispatch)" ]; then cat "$ORCA_SIM/terminal/$(fl dispatch)"; else ok; fi
+    ;;
+  send)
+    upd '.sent += [{to: $to, subject: $s}]' --arg to "$(fl to)" --arg s "$(fl subject)"
+    ok
+    ;;
+  inbox)
+    jq -c --arg r "$(fl terminal)" '{ok: true, result: {messages: (.inbox[$r | ltrimstr("run:")] // []), count: 0}}' "$st"
+    ;;
+  create)
+    case "$group" in
+      worktree)
+        repo=$(fl repo)
+        dir=$ORCA_SIM/worktrees/$(fl name)
+        mkdir -p "$ORCA_SIM/worktrees"
+        git -C "${repo#path:}" worktree add -q -b "$(fl branch)" "$dir" "$(fl base-branch)" > /dev/null 2>&1 || die "worktree not created"
+        echo '{"ok":true,"result":{}}'
+        ;;
+      terminal)
+        upd '.terminals += [{worktree: $w, title: $t, command: $c}]' --arg w "$(fl worktree)" --arg t "$(fl title)" --arg c "$(fl command)"
+        ok
+        ;;
+      *) die "unknown command $group $cmd" ;;
+    esac
+    ;;
+  *) die "unknown command $group $cmd" ;;
+esac

@@ -41,6 +41,7 @@ world() {
   echo ready | fixture gh issue view 7 -R "$REPO" --json labels -q '[.labels[].name] | join(",")'
   echo "PASS: pushed app-7" | fixture gantry-gate-evidence
   echo "PASS: verdict at head" | fixture gantry-verdict-check --pr 9 --repo "$REPO" --no-label
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
   fixture gh pr ready 9 -R "$REPO" < /dev/null
   checks '[{"name":"gantry / ci-ok","bucket":"pass"}]'
   fixture gh pr merge 9 -R "$REPO" --squash --match-head-commit "$HEAD_SHA" < /dev/null
@@ -60,6 +61,16 @@ pr_json() {
 pr() { pr_json "$@" | fixture gh pr view 9 -R "$REPO" --json "$PR_FIELDS"; }
 # pr_seq <n> <args of pr_json>: the nth read of PR #9 returns this; the last one repeats.
 pr_seq() { n=$1; shift; pr_json "$@" | fixture_seq "$n" gh pr view 9 -R "$REPO" --json "$PR_FIELDS"; }
+# review_comment <association> <head> [body]: a PR comment; the default body is the review station's.
+review_comment() {
+  body=$(printf 'factory review: round 1, tier low, head %s\nCovered: everything\nFindings: none' "$2")
+  [ $# -lt 3 ] || body=$3
+  jq -cn --arg a "$1" --arg b "$body" '{author_association: $a, body: $b}'
+}
+# reviewed <comment json...>: PR #9's comments.
+reviewed() {
+  printf '[%s]\n' "$(printf '%s\n' "$@" | paste -sd , -)" | fixture gh api "repos/$REPO/issues/9/comments" --paginate
+}
 checks() { printf '%s\n' "$1" | fixture gh pr checks 9 -R "$REPO" --required --json name,bucket; }
 timeline() { printf '%s\n' "$1" | fixture gh api "repos/$REPO/issues/7/timeline" --paginate; }
 ci_runs() { printf '%s\n' "$1" | fixture gh run list -R "$REPO" --workflow ci.yml --commit "$HEAD_SHA" --limit 20 --json databaseId,attempt,status,conclusion; }
@@ -116,6 +127,7 @@ test_mode_comes_from_the_base_branch_not_the_pr() {
   git_q push origin app-7
   HEAD_SHA=$(git rev-parse HEAD)
   pr OPEN true MERGEABLE CLEAN
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
   ship_status
   assert_eq PARKED "$(last_line)" "result"
   assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
@@ -483,4 +495,33 @@ test_worktree_on_another_branch_stops() {
   assert_eq 1 "$status" "exit status"
   assert_contains "$(last_line)" "STOPPED: sf-ship ran in a worktree on branch main, not PR #9's branch app-7"
   assert_eq 0 "$(count_calls "gantry-")" "gate calls"
+}
+
+test_no_review_comment_for_the_head_stops_before_merging() {
+  world auto
+  reviewed "$(review_comment OWNER 0000000000000000000000000000000000000000)" "$(review_comment NONE "$HEAD_SHA")"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(last_line)" "STOPPED: no review for PR #9 head $HEAD_SHA" "last line"
+  assert_not_called "gh pr merge 9 -R $REPO --squash --match-head-commit $HEAD_SHA"
+  assert_not_called "gh pr ready 9 -R $REPO"
+}
+
+test_codex_not_run_comment_counts_as_the_review() {
+  world auto
+  pr_seq 1 OPEN true MERGEABLE CLEAN
+  pr_seq 2 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  reviewed "$(review_comment OWNER "$HEAD_SHA" "factory: Codex review not run: codex not installed (head $HEAD_SHA)")"
+  ship_status
+  assert_eq 0 "$status" "exit status"
+  assert_eq "MERGED abc123" "$(last_line)" "last line"
+}
+
+test_comment_without_a_findings_line_is_not_a_review() {
+  world auto
+  reviewed "$(review_comment OWNER "$HEAD_SHA" "Covered: everything at $HEAD_SHA")"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(last_line)" "STOPPED: no review for PR #9" "last line"
 }

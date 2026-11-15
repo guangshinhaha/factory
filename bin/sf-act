@@ -1,0 +1,675 @@
+#!/bin/sh
+# sf-act: carry out sf-state's actions for one repo. sf-tick spawns it in an Orca terminal (a
+# precheck can't bind a Run), from the repo's main checkout. To act by hand, run sf-tick: sf-act
+# without --lock takes no lock, so it can race a tick.
+# Usage: sf-act [--repo owner/repo] [--lock <dir>]
+#   --lock  sf-tick's host-wide lock dir: sf-act claims it by writing its pid there (only if no
+#           pid is there yet), and on exit removes it only while that pid is still its own.
+#
+# Each pass reruns sf-state and acts on every action; passes repeat (at most 4) while the action
+# list changes, so a task created in one pass starts in the next, in the same fire.
+#
+# The Run DAG is built lazily. Worker tasks carry their brief as the task spec (worker-start
+# --task takes no other spec); inline tasks are steps sf-act does itself when they turn ready:
+#   start      attempt marker, run-create `factory O/R#N`, `intake` + inline `route`
+#   route      intake said go: plan_first -> `plan` + `post-plan`; else branch prep, `build` + `gate`
+#   post-plan  posts the plan body on the issue, then branch prep, `build` + `gate`
+#   gate       gantry-gate-evidence in the branch worktree, opens or reuses the draft PR, then
+#              `review` + `verify` + inline `ship`. A failed gate gets one `build fix` + `gate fix`
+#              with the gate's output; a failed `gate fix` stops.
+#   ship       sf-ship; merged or parked -> `debrief` (fresh branch from origin's default, never
+#              the PR branch, so the verdict stands) + inline `lessons`; rebased -> new review,
+#              verify and ship
+#   lessons    pushes debrief's notes as a docs PR, files general lessons as shinstack friction
+# Round 2 tasks (after review findings or a verify FAIL in round 1) carry the suffix ` r2`.
+# Every inline step creates its children with deps on itself and checks for them first, so a
+# step that dies midway is redone without doubling anything. sf-act binds the Run (`run-use`)
+# before each change: binding is last-writer-wins.
+#
+# A failed task is acted on in the same fire (station result contract, #7): hold with a reset ->
+# sf-hold; findings or FAIL in round 1 -> round 2; anything else -> sf-stop. sf-act marks a task
+# it gives up on `failed` with a `stop` result before calling sf-stop, so a failed sf-stop
+# leaves a dead Run that sf-state turns into the same stop next fire, never a new Run.
+#
+# Exit 0: every action done. 1: an action failed (the next fire retries). 2: bad arguments.
+set -u
+
+me=sf-act
+root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/factory.sh
+. "$root/lib/factory.sh"
+# The sibling sf-* scripts are found on PATH (sf-tick puts this bin dir first).
+case ":$PATH:" in
+  *":$root/bin:"*) ;;
+  *) PATH=$PATH:$root/bin && export PATH ;;
+esac
+
+SHINSTACK_REPO=guangshinhaha/shinstack
+
+repo='' lock=''
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || usage_error "$1 needs a value"
+  case "$1" in
+    --repo) repo=$2 ;;
+    --lock) lock=$2 ;;
+    *) usage_error "unknown argument: $1" ;;
+  esac
+  shift 2
+done
+need_jq
+repo=$(resolve_repo "$repo") || exit 2
+name=${repo#*/}
+main=$(pwd)
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-act.XXXXXX") || die "temp dir not created"
+if [ -n "$lock" ]; then
+  [ -d "$lock" ] || { rm -rf "$tmp"; die "lock $lock not held: sf-tick takes it before spawning sf-act"; }
+  # noclobber: a pid already there means another sf-act claimed it (this one started too late).
+  (set -C && echo $$ > "$lock/pid") 2> /dev/null || { rm -rf "$tmp"; die "lock $lock already claimed by pid $(cat "$lock/pid" 2> /dev/null)"; }
+  trap 'rm -rf "$tmp"; [ "$(cat "$lock/pid" 2> /dev/null)" != $$ ] || rm -rf "$lock"' EXIT
+else
+  trap 'rm -rf "$tmp"' EXIT
+fi
+trap 'exit 1' INT TERM HUP
+for g in gantry-gate-evidence gantry-verdict-check; do
+  command -v "$g" > /dev/null 2>&1 || die "$g not found on PATH (sf-act runs with sf-tick's PATH)"
+done
+
+log() { echo "$me: $*" >&2; }
+o() { orca orchestration "$@"; }
+# First line of a file, for messages.
+first() { sed -n '1{s/[[:space:]]*$//;p;}' "$1"; }
+# A JSON string of $1.
+js() { jq -cn --arg s "$1" '$s'; }
+# The first 400 bytes of stdin, for a result reason.
+clip() { dd bs=400 count=1 2> /dev/null; }
+
+# Usage-limit wording from Claude Code and Codex.
+LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many requests|try again (at|in)'
+
+# ---- Orca -----------------------------------------------------------------------------------
+
+bind() { o run-use --id "$1" --json > /dev/null 2> "$tmp/err" || { log "Run $1 not bound: $(first "$tmp/err")"; return 1; }; }
+
+# load <run>: the Run's tasks, in full, into $tmp/tasks.json.
+load() {
+  o task-list --run "$1" --json --full > "$tmp/tasks.json" 2> "$tmp/err" || { log "tasks of Run $1 not listed: $(first "$tmp/err")"; return 1; }
+  jq -e '.ok == true and (.result.tasks | type == "array")' "$tmp/tasks.json" > /dev/null 2>&1 \
+    || { log "tasks of Run $1 not listed: task-list printed no task array"; return 1; }
+}
+tfield() { jq -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
+title_of() { jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | .task_title // .display_name // ""' "$tmp/tasks.json"; }
+# find_task <title> [parent]: the id of the task with this title (whose deps hold parent).
+find_task() {
+  jq -r --arg title "$1" --arg p "${2:-}" '[.result.tasks[] | select((.task_title // .display_name) == $title)
+    | select($p == "" or ((try (.deps | fromjson) catch []) | index($p)))] | last | .id // empty' "$tmp/tasks.json"
+}
+
+# create <run> <title> <deps json> [parent]: create the task (spec on stdin) unless a task with
+# this title and parent exists; print its id. Reloads the task list. No --display-name: Orca's
+# concise task-list shows it as `title`, and sf-state matches titles (ship, debrief, lessons).
+create() {
+  id=$(find_task "$2" "${4:-}")
+  if [ -n "$id" ]; then
+    cat > /dev/null
+    printf '%s\n' "$id"
+    return 0
+  fi
+  o task-create --run "$1" --task-title "$2" --deps "$3" --spec-file - --json > "$tmp/created" 2> "$tmp/err" \
+    || { log "task $2 not created in Run $1: $(first "$tmp/err")"; return 1; }
+  id=$(jq -r '.result.taskId // empty' "$tmp/created")
+  [ -n "$id" ] || { log "task $2 not created in Run $1: task-create printed no taskId"; return 1; }
+  load "$1" || return 1
+  printf '%s\n' "$id"
+}
+
+done_with() { o task-update --id "$1" --status completed --result "$2" --json > /dev/null 2> "$tmp/err" || { log "task $1 not completed: $(first "$tmp/err")"; return 1; }; }
+failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /dev/null 2> "$tmp/err" || { log "task $1 not marked failed: $(first "$tmp/err")"; return 1; }; }
+
+# The task's result line JSON (`factory-result: {...}`, the body's last non-empty line), or
+# nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
+result_json() {
+  raw=$(tfield "$1" result)
+  body=$(printf '%s' "$raw" | jq -Rrs 'try (fromjson | .body // empty) catch empty' 2> /dev/null)
+  [ -n "$body" ] || body=$raw
+  line=$(printf '%s\n' "$body" | awk 'NF { l = $0 } END { print l }')
+  case "$line" in
+    'factory-result: '*) printf '%s\n' "${line#factory-result: }" | jq -c 'select(type == "object")' 2> /dev/null ;;
+  esac
+}
+outcome_of() { tfield "$1" result | jq -Rrs 'try (fromjson | .outcome // empty) catch empty' 2> /dev/null; }
+# The worker body minus its result line (plan's plan).
+body_of() {
+  raw=$(tfield "$1" result)
+  body=$(printf '%s' "$raw" | jq -Rrs 'try (fromjson | .body // empty) catch empty' 2> /dev/null)
+  printf '%s\n' "$body" | grep -v '^factory-result:'
+}
+rget() { printf '%s\n' "$1" | jq -r "$2 // empty | tostring"; }
+
+station_of() { printf '%s\n' "${1%% *}"; }
+round_of() { case " $1 " in *" r2 "*) echo 2 ;; *) echo 1 ;; esac; }
+# A worker station's success statuses (contract #7), plus sf-act's own completions.
+ok_status() {
+  case "$1:$2" in
+    intake:go | plan:planned | build:built | review:clean | review:not-run | verify:PASS | verify:PASS+NOTES) return 0 ;;
+    debrief:debriefed | debrief:nothing | *:reworked) return 0 ;;
+  esac
+  return 1
+}
+
+# ---- GitHub and git ----------------------------------------------------------------------------
+
+comment() { gh issue comment "$issue" -R "$repo" --body-file - > /dev/null 2> "$tmp/err" || { log "comment not posted on #$issue: $(first "$tmp/err")"; return 1; }; }
+branch() { echo "$name-$issue"; }
+debrief_branch() { echo "debrief-$name-$issue"; }
+# The worktree checked out on branch $1, from git (no local state).
+branch_wt() {
+  git -C "$main" worktree list --porcelain | awk -v ref="refs/heads/$1" '/^worktree / { w = substr($0, 10) } $0 == "branch " ref { print w; exit }'
+}
+default_ref() {
+  git -C "$main" symbolic-ref -q --short refs/remotes/origin/HEAD && return 0
+  git -C "$main" remote set-head origin -a > /dev/null 2>&1 && git -C "$main" symbolic-ref -q --short refs/remotes/origin/HEAD
+}
+open_pr() { gh pr list -R "$repo" --head "$1" --state open --json number -q '.[0].number // empty'; }
+
+# prep <branch>: a worktree on <branch> at freshly fetched origin's default (#227); a stale remote
+# branch with no open PR (#186) is deleted. Prints the worktree path.
+prep() {
+  b=$1
+  git -C "$main" fetch -q --prune origin 2> "$tmp/err" || { log "origin not fetched: $(first "$tmp/err")"; return 1; }
+  def=$(default_ref) || { log "origin's default branch not known (refs/remotes/origin/HEAD)"; return 1; }
+  wt=$(branch_wt "$b")
+  if [ -n "$wt" ]; then
+    { git -C "$wt" reset -q --hard "$def" && git -C "$wt" clean -fdq; } || { log "worktree $wt not reset to $def"; return 1; }
+  else
+    if git -C "$main" show-ref --verify -q "refs/heads/$b"; then
+      git -C "$main" branch -q -D "$b" || { log "stale local branch $b not deleted"; return 1; }
+    fi
+    orca worktree create --name "$b" --repo "path:$main" --base-branch "$def" --branch "$b" --issue "$issue" --no-parent --json > /dev/null 2> "$tmp/err" \
+      || { log "worktree for $b not created: $(first "$tmp/err")"; return 1; }
+    wt=$(branch_wt "$b")
+    [ -n "$wt" ] || { log "worktree for branch $b not found after orca worktree create"; return 1; }
+  fi
+  if git -C "$main" show-ref --verify -q "refs/remotes/origin/$b"; then
+    pr=$(open_pr "$b") || { log "open PRs for $b not listed"; return 1; }
+    if [ -z "$pr" ]; then
+      git -C "$main" push -q origin --delete "$b" 2> "$tmp/err" || { log "stale remote branch $b not deleted: $(first "$tmp/err")"; return 1; }
+      log "deleted stale remote branch $b"
+    fi
+  fi
+  printf '%s\n' "$wt"
+}
+
+# ---- giving up -------------------------------------------------------------------------------
+
+# give_up <task> <station> <reason>: mark the task failed with a stop result, then sf-stop.
+give_up() {
+  failed_with "$1" "factory-result: {\"station\":$(js "$2"),\"status\":\"stop\",\"reason\":$(js "$3")}" || return 1
+  sf-stop --repo "$repo" "$issue" "$3" >&2
+}
+# hold_task <task> <station> <provider> <reset> <reason>: mark the task failed with a hold result,
+# then sf-hold; sf-state restarts the task after <reset>.
+hold_task() {
+  failed_with "$1" "factory-result: {\"station\":$(js "$2"),\"status\":\"hold\",\"provider\":$(js "$3"),\"reset\":$(js "$4"),\"reason\":$(js "$5")}" || return 1
+  sf-hold --repo "$repo" "$issue" "$3" "$4" >&2
+}
+in_an_hour() { jq -nr 'now + 3600 | floor | todate'; }
+provider_of() { [ "$1" = review ] && echo codex || echo claude; }
+# limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
+limit_seen() {
+  ld=$(o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty')
+  [ -n "$ld" ] || return 1
+  o worker-read --dispatch "$ld" --source terminal --json 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
+}
+
+# ---- launching workers -------------------------------------------------------------------------
+
+# live_worker <task>: print the dispatch of the task's last worker unless Orca shows it exited.
+# After an Orca restart a task can be ready again while its old worker session lives on (#7).
+# A dispatch Orca can't show (no worker record) counts as gone.
+live_worker() {
+  ld=$(o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty')
+  [ -n "$ld" ] || return 1
+  o worker-show --dispatch "$ld" --json > "$tmp/worker" 2> /dev/null || return 1
+  [ "$(jq -r '.result.liveness // "unknown"' "$tmp/worker")" != exited ] || return 1
+  printf '%s\n' "$ld"
+}
+
+# brief <task title>: the worker's brief, from sf-brief. Needs intake's decision for build onwards.
+brief_for() {
+  st=$(station_of "$1")
+  rd=$(round_of "$1")
+  set -- "$st" --repo "$repo" --issue "$issue"
+  case "$st" in
+    intake | plan) ;;
+    debrief)
+      set -- "$@" --branch "$(debrief_branch)"
+      [ -z "${pr:-}" ] || set -- "$@" --pr "$pr"
+      ;;
+    *)
+      intake=$(find_task intake)
+      ij=$(result_json "$intake")
+      set -- "$@" --branch "$(branch)" --tier "$(rget "$ij" .tier)"
+      [ "$st" = build ] && set -- "$@" --work-type "$(rget "$ij" .work_type)"
+      if [ "$st" != build ] || [ "$rd" = 2 ]; then
+        pr=$(open_pr "$(branch)") && [ -n "$pr" ] || { log "no open PR on $(branch) for the $st brief"; return 1; }
+        set -- "$@" --pr "$pr"
+      fi
+      case "$st" in build | review) set -- "$@" --round "$rd" ;; esac
+      ;;
+  esac
+  sf-brief "$@"
+}
+
+# start_worker <run> <task>: launch the task's worker per the launch table (#7).
+start_worker() {
+  t=$2
+  title=$(title_of "$t")
+  st=$(station_of "$title")
+  case "$st" in
+    intake) agent=claude model=sonnet wt=$main ;;
+    plan) agent=claude model=opus wt=$main ;;
+    build) agent=claude model=sonnet wt=$(branch_wt "$(branch)") ;;
+    review) agent=codex model=codex-auto-review wt=$(branch_wt "$(branch)") ;;
+    verify) agent=claude model=opus wt=$(branch_wt "$(branch)") ;;
+    debrief) agent=claude model=haiku wt=$(prep "$(debrief_branch)") || return 1 ;;
+  esac
+  [ -n "$wt" ] || { give_up "$t" "$st" "$title worker not started: no worktree on branch $(branch)"; return 1; }
+  bind "$1" || return 1
+  if lw=$(live_worker "$t"); then
+    log "#$issue: $title worker not started: its last worker ($lw) has not exited; next fire retries"
+    return 1
+  fi
+  if o worker-start --task "$t" --agent "$agent" --model "$model" --worktree "path:$wt" --run "$1" --json > "$tmp/started" 2> "$tmp/err"; then
+    log "#$issue: started $title ($agent/$model)"
+    return 0
+  fi
+  why=$(cat "$tmp/started" "$tmp/err" | tr '\n' ' ' | clip)
+  if printf '%s\n' "$why" | grep -Eiq "$LIMIT_RE"; then
+    hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$agent usage limit: $why"
+    return
+  fi
+  if [ "$st" = review ]; then
+    # No Codex access is a skip with a PR comment; anything else a usage limit didn't explain stops.
+    if printf '%s\n' "$why" | grep -Eiq 'not installed|codex[^ ]* not found|command not found|not signed in|not logged in|log ?in required|unauthenticated|unauthorized|unknown agent'; then
+      pr=$(open_pr "$(branch)")
+      head=$(git -C "$wt" rev-parse HEAD 2> /dev/null)
+      [ -n "$pr" ] || { log "no open PR on $(branch) for the not-run comment"; return 1; }
+      printf 'factory: Codex review not run: %s (head %s)\n' "$why" "$head" \
+        | gh pr comment "$pr" -R "$repo" --body-file - > /dev/null 2> "$tmp/err" || { log "not-run comment not posted on PR #$pr: $(first "$tmp/err")"; return 1; }
+      done_with "$t" "factory-result: {\"station\":\"review\",\"status\":\"not-run\",\"head_sha\":$(js "$head"),\"reason\":$(js "$why")}"
+      return
+    fi
+    give_up "$t" review "Codex review worker not started: $why"
+    return
+  fi
+  log "#$issue: $title worker not started, next fire retries: $why"
+  return 1
+}
+
+# ---- inline steps --------------------------------------------------------------------------------
+
+# need_result <task> <station>: print the task's result JSON when it is a success; else give up
+# on <for> (the step reading it).
+need_result() {
+  rj=$(result_json "$1")
+  [ -n "$rj" ] || { echo "$2 result has no parseable factory-result line"; return 1; }
+  [ "$(rget "$rj" .station)" = "$2" ] || { echo "$2 result names station [$(rget "$rj" .station)]"; return 1; }
+  ok_status "$2" "$(rget "$rj" .status)" || { echo "$2 completed with status [$(rget "$rj" .status)]"; return 1; }
+  printf '%s\n' "$rj"
+}
+
+# build_tasks <run> <parent> [round] [fix]: build + gate after <parent>, with the gate's output
+# appended to a fix build's brief.
+build_tasks() {
+  sfx=''
+  [ "${3:-1}" = 2 ] && sfx=' r2'
+  [ -n "${4:-}" ] && sfx="$sfx fix"
+  : > "$tmp/brief"
+  if [ -z "$(find_task "build$sfx" "$2")" ]; then
+    brief_for "build$sfx" > "$tmp/brief" || return 1
+    [ -z "${4:-}" ] || printf '\n## Evidence gate failure\nThe factory pushed your last commits and the gate refused them. Fix this, commit, and report again:\n\n%s\n' "$4" >> "$tmp/brief"
+  fi
+  b=$(create "$1" "build$sfx" "[\"$2\"]" "$2" < "$tmp/brief") || return 1
+  g=$(echo "inline step: sf-act pushes through gantry-gate-evidence and opens the PR" | create "$1" "gate$sfx" "[\"$b\"]" "$b") || return 1
+  echo "$b $g"
+}
+
+# review_tasks <run> <parent> <round>: review -> verify -> ship after <parent>.
+review_tasks() {
+  sfx=''
+  [ "$3" = 2 ] && sfx=' r2'
+  : > "$tmp/brief"
+  if [ -z "$(find_task "review$sfx" "$2")" ]; then brief_for "review$sfx" > "$tmp/brief" || return 1; fi
+  rv=$(create "$1" "review$sfx" "[\"$2\"]" "$2" < "$tmp/brief") || return 1
+  : > "$tmp/brief"
+  if [ -z "$(find_task "verify$sfx" "$rv")" ]; then brief_for "verify$sfx" > "$tmp/brief" || return 1; fi
+  vf=$(create "$1" "verify$sfx" "[\"$rv\"]" "$rv" < "$tmp/brief") || return 1
+  echo "inline step: sf-act runs sf-ship" | create "$1" ship "[\"$vf\"]" "$vf" > /dev/null
+}
+
+step_route() {
+  if ! ij=$(need_result "$(find_task intake)" intake); then give_up "$2" route "$ij"; return 1; fi
+  if [ "$(rget "$ij" .plan_first)" = true ]; then
+    : > "$tmp/brief"
+    if [ -z "$(find_task plan "$2")" ]; then
+      brief_for plan > "$tmp/brief" 2> "$tmp/err" || { give_up "$2" route "plan station not available: $(first "$tmp/err")"; return 1; }
+    fi
+    p=$(create "$1" plan "[\"$2\"]" "$2" < "$tmp/brief") || return 1
+    echo "inline step: sf-act posts the plan on the issue, then starts build" | create "$1" post-plan "[\"$p\"]" "$p" > /dev/null || return 1
+  else
+    if [ -z "$(find_task build "$2")" ]; then prep "$(branch)" > /dev/null || return 1; fi
+    build_tasks "$1" "$2" > /dev/null || return 1
+  fi
+  done_with "$2" "routed"
+}
+
+step_post_plan() {
+  p=$(find_task plan)
+  if ! pj=$(need_result "$p" plan); then give_up "$2" post-plan "$pj"; return 1; fi
+  marks=$(markers_since_ready "$repo" "$issue") || { log "timeline of #$issue not read"; return 1; }
+  if ! printf '%s\n' "$marks" | jq -e --arg p "$p" 'any(.[]; .kind == "plan" and .task == $p)' > /dev/null; then
+    { body_of "$p"; printf '\n<!-- factory:{"kind":"plan","task":"%s"} -->\n' "$p"; } | comment || return 1
+  fi
+  if [ -z "$(find_task build "$2")" ]; then prep "$(branch)" > /dev/null || return 1; fi
+  build_tasks "$1" "$2" > /dev/null || return 1
+  done_with "$2" "plan posted"
+}
+
+step_gate() {
+  title=$(title_of "$2")
+  rd=$(round_of "$title")
+  bt=$(jq -r --arg t "$2" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[0] // empty' "$tmp/tasks.json")
+  if ! bj=$(need_result "$bt" build); then give_up "$2" gate "$bj"; return 1; fi
+  b=$(branch)
+  wt=$(branch_wt "$b")
+  [ -n "$wt" ] || { give_up "$2" gate "no worktree on branch $b"; return 1; }
+  labels=$(gh issue view "$issue" -R "$repo" --json labels -q '[.labels[].name] | join(",")') || { log "labels of #$issue not read"; return 1; }
+  run=$1 t=$2
+  set -- --force-with-lease
+  case ",$labels," in *,bug,*) set -- "$@" --bug ;; esac
+  rc=0
+  (cd "$wt" && gantry-gate-evidence "$@") > "$tmp/gate" 2>&1 || rc=$?
+  case $rc in
+    0) ;;
+    1)
+      out=$(clip < "$tmp/gate")
+      case " $title " in
+        *" fix "*) give_up "$t" gate "evidence gate failed again after a fix: $out"; return 1 ;;
+      esac
+      build_tasks "$run" "$t" "$rd" "$(cat "$tmp/gate")" > /dev/null || return 1
+      done_with "$t" "FAIL: $out"
+      return
+      ;;
+    *) log "#$issue: gantry-gate-evidence exited $rc: $(first "$tmp/gate")"; return 1 ;;
+  esac
+  pr=$(open_pr "$b") || { log "open PRs for $b not listed"; return 1; }
+  if [ -z "$pr" ]; then
+    it=$(gh issue view "$issue" -R "$repo" --json title -q .title) || { log "title of #$issue not read"; return 1; }
+    def=$(default_ref) || return 1
+    printf 'Closes #%s\n\n## Scope\nBuilt by the factory for #%s; the issue'"'"'s Done when is the scope.\n' "$issue" "$issue" \
+      | gh pr create -R "$repo" --draft --head "$b" --base "${def#origin/}" --title "$it" --body-file - > /dev/null 2> "$tmp/err" \
+      || { log "PR for $b not opened: $(first "$tmp/err")"; return 1; }
+    log "#$issue: opened a draft PR for $b"
+  fi
+  review_tasks "$run" "$t" "$rd" || return 1
+  done_with "$t" "PASS"
+}
+
+step_ship() {
+  pr=$3
+  wt=$(branch_wt "$(branch)")
+  [ -n "$wt" ] || { give_up "$2" ship "no worktree on branch $(branch)"; return 1; }
+  rc=0
+  (cd "$wt" && sf-ship --repo "$repo" "$issue" "$pr") > "$tmp/ship" || rc=$?
+  last=$(awk 'NF { l = $0 } END { print l }' "$tmp/ship")
+  case $rc in
+    0)
+      if [ -z "$(find_task debrief "$2")" ]; then
+        if brief_for debrief > "$tmp/brief" 2> "$tmp/err"; then
+          d=$(create "$1" debrief "[\"$2\"]" "$2" < "$tmp/brief") || return 1
+          echo "inline step: sf-act pushes debrief notes and files lessons" | create "$1" lessons "[\"$d\"]" "$d" > /dev/null || return 1
+        else
+          log "#$issue: no debrief: $(first "$tmp/err")"
+        fi
+      fi
+      done_with "$2" "$last"
+      ;;
+    1) failed_with "$2" "factory-result: {\"station\":\"ship\",\"status\":\"stop\",\"reason\":$(js "${last#STOPPED: }")}" ;;
+    3)
+      rd=1
+      [ -n "$(find_task 'review r2')" ] && rd=2
+      review_tasks "$1" "$2" "$rd" || return 1
+      done_with "$2" "$last"
+      ;;
+    *) log "#$issue: sf-ship: $last (next fire retries)" ;;
+  esac
+}
+
+step_lessons() {
+  d=$(find_task debrief)
+  if ! dj=$(need_result "$d" debrief); then done_with "$2" "no lessons: $dj"; return; fi
+  if [ "$(rget "$dj" .status)" = debriefed ]; then
+    db=$(debrief_branch)
+    wt=$(branch_wt "$db")
+    if [ -n "$wt" ] && [ -z "$(open_pr "$db")" ]; then
+      if (cd "$wt" && gantry-gate-evidence) > "$tmp/gate" 2>&1; then
+        def=$(default_ref) || return 1
+        printf 'Debrief notes from #%s.\n\n## Scope\nDocs only: notes under docs/solutions/.\n' "$issue" \
+          | gh pr create -R "$repo" --head "$db" --base "${def#origin/}" --title "docs: debrief notes from #$issue" --body-file - > /dev/null 2> "$tmp/err" \
+          || { log "debrief PR not opened: $(first "$tmp/err")"; return 1; }
+      else
+        log "#$issue: debrief notes not pushed: $(first "$tmp/gate")"
+      fi
+    fi
+  fi
+  # shinstack is public: a lesson is capped and refused when it names this repo.
+  printf '%s\n' "$dj" | jq -c --arg r "$repo" --arg n "$name" '.lessons // [] | .[]
+    | select((.file | type) == "string" and (.what | type) == "string")
+    | select((.file | length) <= 200 and (.what | length) <= 600 and (.file | length) > 0 and (.what | length) > 0)
+    | select(([.file, .what] | join(" ") | ascii_downcase) as $t | ($t | contains($r | ascii_downcase) | not) and ($t | contains($n | ascii_downcase) | not))' \
+    > "$tmp/lessons" || return 1
+  if [ -s "$tmp/lessons" ]; then
+    gh issue list -R "$SHINSTACK_REPO" --state all --limit 1000 --json title -q '.[].title' > "$tmp/titles" 2> "$tmp/err" \
+      || { log "$SHINSTACK_REPO issues not listed: $(first "$tmp/err")"; return 1; }
+    while IFS= read -r l; do
+      file=$(rget "$l" .file)
+      what=$(rget "$l" .what)
+      t="friction: $file: $(printf '%s' "$what" | cut -c 1-80)"
+      grep -Fxq -- "$t" "$tmp/titles" && continue
+      printf '**File:** %s\n\n%s\n\nFiled by the factory from a debrief.\n' "$file" "$what" \
+        | gh issue create -R "$SHINSTACK_REPO" -l friction --title "$t" --body-file - > /dev/null 2> "$tmp/err" \
+        || { log "friction issue not filed: $(first "$tmp/err")"; return 1; }
+      printf '%s\n' "$t" >> "$tmp/titles"
+    done < "$tmp/lessons"
+  fi
+  done_with "$2" "lessons filed"
+}
+
+# ---- actions -------------------------------------------------------------------------------------
+
+act_start() {
+  printf 'factory: starting an attempt.\n\n<!-- factory:{"kind":"attempt"} -->\n' | comment || return 1
+  o run-create --objective "factory $repo#$issue" --json > "$tmp/run" 2> "$tmp/err" || { log "Run for #$issue not created: $(first "$tmp/err")"; return 1; }
+  run=$(jq -r '.result.runId // empty' "$tmp/run")
+  [ -n "$run" ] || { log "Run for #$issue not created: run-create printed no runId"; return 1; }
+  load "$run" || return 1
+  brief_for intake > "$tmp/brief" 2> "$tmp/err" || { sf-stop --repo "$repo" "$issue" "intake brief not rendered: $(first "$tmp/err")" >&2; return 1; }
+  it=$(create "$run" intake '[]' < "$tmp/brief") || return 1
+  echo "inline step: sf-act routes on intake's decision" | create "$run" route "[\"$it\"]" "$it" > /dev/null || return 1
+  start_worker "$run" "$it"
+}
+
+act_advance() {
+  run=$1 t=$2
+  load "$run" || return 1
+  [ "$(tfield "$t" status)" = ready ] || return 0
+  title=$(title_of "$t")
+  st=$(station_of "$title")
+  case "$st" in
+    intake)
+      # A start killed between the two task-creates left intake without its route.
+      bind "$run" || return 1
+      echo "inline step: sf-act routes on intake's decision" | create "$run" route "[\"$t\"]" "$t" > /dev/null || return 1
+      start_worker "$run" "$t"
+      ;;
+    plan | build | review | verify | debrief) start_worker "$run" "$t" ;;
+    route | post-plan | gate | lessons)
+      bind "$run" || return 1
+      case "$st" in
+        route) step_route "$run" "$t" ;;
+        post-plan) step_post_plan "$run" "$t" ;;
+        gate) step_gate "$run" "$t" ;;
+        lessons) step_lessons "$run" "$t" ;;
+      esac
+      ;;
+    *) give_up "$t" "$st" "task [$title] is not a factory task" ;;
+  esac
+}
+
+act_ship() {
+  load "$1" || return 1
+  [ "$(tfield "$2" status)" = ready ] || return 0
+  if ! vj=$(need_result "$(jq -r --arg t "$2" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[0] // empty' "$tmp/tasks.json")" verify); then
+    bind "$1" && give_up "$2" ship "$vj"
+    return 1
+  fi
+  bind "$1" || return 1
+  step_ship "$1" "$2" "$3"
+}
+
+act_restart() {
+  load "$1" || return 1
+  printf 'factory: the hold has passed; restarting %s.\n\n<!-- factory:{"kind":"restart"} -->\n' "$(title_of "$2")" | comment || return 1
+  bind "$1" || return 1
+  # The held worker may still sit at its usage limit: fence it so the restart is the only worker.
+  if lw=$(live_worker "$2"); then
+    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "held worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+  fi
+  o task-update --id "$2" --status ready --json > /dev/null 2> "$tmp/err" || { log "task $2 not set ready: $(first "$tmp/err")"; return 1; }
+  act_advance "$1" "$2"
+}
+
+act_nudge() {
+  run=$1 t=$2 d=$3
+  load "$run" || return 1
+  title=$(title_of "$t")
+  st=$(station_of "$title")
+  bind "$run" || return 1
+  if limit_seen "$t"; then
+    hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$title worker stopped at a usage limit"
+    return
+  fi
+  o send --to "dispatch:$d" --run "$run" --subject "factory: report your result" \
+    --body "You ended your turn without worker_done. Finish the task in the foreground, then send worker_done with the factory-result line. If you can't finish, report status stop with the reason." \
+    --json > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
+  printf 'factory: nudged the %s worker, which stopped without reporting.\n\n<!-- factory:{"kind":"nudge","dispatch":"%s"} -->\n' "$title" "$d" | comment
+}
+
+# act_stop <reason> [run task [dispatch]]
+act_stop() {
+  reason=$1
+  [ -n "${2:-}" ] || { sf-stop --repo "$repo" "$issue" "$reason" >&2; return; }
+  run=$2 t=$3
+  load "$run" || return 1
+  title=$(title_of "$t")
+  st=$(station_of "$title")
+  if [ -n "${4:-}" ]; then
+    bind "$run" || return 1
+    o worker-stop --dispatch "$4" --json > /dev/null 2>&1 || log "worker of dispatch $4 not stopped"
+    give_up "$t" "$st" "$reason"
+    return
+  fi
+  rj=$(result_json "$t")
+  if [ -z "$rj" ]; then
+    case "$st" in
+      intake | plan | build | review | verify | debrief)
+        if limit_seen "$t"; then
+          bind "$run" || return 1
+          hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$title worker stopped at a usage limit"
+          return
+        fi
+        ;;
+    esac
+    sf-stop --repo "$repo" "$issue" "$title failed with no factory-result line" >&2
+    return
+  fi
+  rs=$(rget "$rj" .station)
+  status=$(rget "$rj" .status)
+  [ "$rs" = "$st" ] || { sf-stop --repo "$repo" "$issue" "$title result names station [$rs]" >&2; return; }
+  if [ "$(outcome_of "$t")" = succeeded ] && ! ok_status "$st" "$status"; then
+    sf-stop --repo "$repo" "$issue" "$title reported success with status [$status]" >&2
+    return
+  fi
+  case "$status" in
+    stop) sf-stop --repo "$repo" "$issue" "$title: $(rget "$rj" .reason)" >&2 ;;
+    hold)
+      provider=$(rget "$rj" .provider)
+      reset=$(rget "$rj" .reset)
+      deps=$(printf '%s\n' "$rj" | jq -r '.depends_on // [] | map("#\(.)") | join(", ")')
+      if [ -n "$provider" ] && [ -n "$reset" ]; then
+        sf-hold --repo "$repo" "$issue" "$provider" "$reset" >&2
+      elif [ -n "$deps" ]; then
+        sf-stop --repo "$repo" "$issue" "$title needs $deps first ($(rget "$rj" .reason)). Add a \`Depends on $deps\` line to the issue, then label it ready again." >&2
+      else
+        sf-stop --repo "$repo" "$issue" "$title hold names no provider and reset, and no depends_on: $(rget "$rj" .reason)" >&2
+      fi
+      ;;
+    findings | FAIL)
+      if [ "$(round_of "$title")" = 2 ]; then
+        sf-stop --repo "$repo" "$issue" "$title: $status in round 2 ($(rget "$rj" .comment_url))" >&2
+        return
+      fi
+      rework "$run" "$t" "$rj"
+      ;;
+    *) sf-stop --repo "$repo" "$issue" "$title failed with status [$status]" >&2 ;;
+  esac
+}
+
+# rework <run> <failed task> <its result>: round 2. New build r2 + gate r2 first (deps on the
+# failed task), then every other pending task is superseded (leaves first, so none turns ready
+# on the way), then the failed task is completed, which releases build r2.
+rework() {
+  bind "$1" || return 1
+  keep=$(build_tasks "$1" "$2" 2) || return 1
+  jq -r --arg keep "$keep" '
+    def leaves_first: if length == 0 then [] else
+      (. as $ts | [$ts[] | select(.id as $i | all($ts[]; (try (.deps | fromjson) catch []) | index($i) | not))][0]) as $leaf
+      | [$leaf] + ([.[] | select(.id != $leaf.id)] | leaves_first) end;
+    [.result.tasks[] | select(.status == "pending" and (.id as $i | $keep | split(" ") | index($i) | not))] | leaves_first | .[].id' \
+    "$tmp/tasks.json" > "$tmp/supersede" || return 1
+  while IFS= read -r s; do
+    done_with "$s" "superseded by round 2" || return 1
+  done < "$tmp/supersede"
+  done_with "$2" "factory-result: {\"station\":$(js "$(station_of "$(title_of "$2")")"),\"status\":\"reworked\",\"was\":$3}"
+}
+
+# ---- passes --------------------------------------------------------------------------------------
+
+exit_status=0
+prev=''
+pass=0
+while [ $pass -lt 4 ]; do
+  pass=$((pass + 1))
+  sf-state "$repo" > "$tmp/actions" || { log "sf-state failed; nothing done this pass"; exit 1; }
+  todo=$(jq -c '[.[] | select(.action != "hold")]' "$tmp/actions") || exit 1
+  [ "$todo" != '[]' ] && [ "$todo" != "$prev" ] || break
+  prev=$todo
+  printf '%s\n' "$todo" | jq -c '.[]' > "$tmp/todo"
+  while IFS= read -r a <&3; do
+    issue=$(rget "$a" .issue)
+    pr=''
+    arc=0
+    case "$(rget "$a" .action)" in
+      start) act_start || arc=$? ;;
+      advance) act_advance "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
+      ship) act_ship "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .pr)" || arc=$? ;;
+      restart) act_restart "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
+      nudge) act_nudge "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
+      stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
+      *) log "unknown action: $a"; arc=1 ;;
+    esac
+    [ $arc -eq 0 ] || { log "action failed: $a"; exit_status=1; }
+  done 3< "$tmp/todo"
+done
+exit "$exit_status"

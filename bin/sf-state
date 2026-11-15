@@ -10,11 +10,18 @@
 #   {"action":"ship","issue":N,"run":R,"task":T,"pr":P}  the Run's `ship` task is ready; P found by branch, never a fork PR
 #   {"action":"restart","issue":N,"run":R,"task":T}      dead Run, its hold marker's reset has passed
 #   {"action":"stop","issue":N,"reason":S}               dead Run with no hold, or 3 attempts since ready
+#     ... ,"run":R,"task":T}                             the dead Run's failed task: sf-act reads its result first
+#     ... ,"run":R,"task":T,"dispatch":D}                its worker stopped without reporting again after a nudge
+#   {"action":"nudge","issue":N,"run":R,"task":T,"dispatch":D}  Orca reported the worker of dispatched
+#                                                        task T stopped without reporting, not yet nudged
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
+# A closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task (they run
+# after the merge closed the issue).
 #
 # Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
 # timeline (the last `ready` label event, and factory marker comments after it), open PRs,
-# and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses.
+# and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
+# the Run inbox's "Worker stopped without reporting" escalations when a task is dispatched.
 # Any failed read prints nothing on stdout and exits 1, so no action runs on partial state.
 set -eu
 
@@ -93,7 +100,21 @@ while :; do
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
     jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
       'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
-      "$tmp/tasks" >> "$tmp/runs.jsonl" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+      "$tmp/tasks" > "$tmp/run.json" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+    # A dispatched task's worker may have stopped without reporting: Orca says so in the Run inbox.
+    # Only a factory Run of this repo is acted on, so only its inbox is read.
+    if jq -e --arg p "factory $repo#" 'any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))' "$tmp/run.json" > /dev/null; then
+      orca orchestration inbox --terminal "run:$id" --limit 500 --json --full > "$tmp/inbox" \
+        || die "inbox of Run $id not read (orca orchestration inbox failed)"
+      jq -c -s -e --slurpfile run "$tmp/run.json" \
+        'select(length == 1) | .[0] | select(.ok == true and (.result.messages | type == "array"))
+         | $run[0] + {escalations: [.result.messages[] | select(.type == "escalation" and .subject == "Worker stopped without reporting")
+             | (try (.payload | fromjson) catch {}) as $p | select(($p.taskId | type) == "string" and ($p.dispatchId | type) == "string")
+             | {task: $p.taskId, dispatch: $p.dispatchId, at: .created_at}]}' \
+        "$tmp/inbox" > "$tmp/run-inbox.json" 2> /dev/null || die "inbox of Run $id not read: $(snippet "$tmp/inbox")"
+      mv "$tmp/run-inbox.json" "$tmp/run.json"
+    fi
+    cat "$tmp/run.json" >> "$tmp/runs.jsonl"
   done < "$tmp/factory-runs.tsv"
   cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')
   [ -n "$cursor" ] || break
@@ -168,7 +189,8 @@ def deps:
   | .refs | unique;
 
 # dead: a failed task, or no tasks 10 minutes after creation (sf-act died between run-create and
-# task-create). A younger Run with no tasks is live: sf-act is still building its DAG.
+# task-create; such a Run is skipped, below). A younger Run with no tasks is live: sf-act is
+# still building its DAG.
 # done: every task completed. The created_at of every Run must parse: an error, not a guess.
 def created_epoch:
   . as $r | try (.created_at | epoch)
@@ -195,14 +217,15 @@ def run_state:
     | ($tl[$i.number | tostring] // []) as $events
     | ([$events[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
     | (if $since == "" then -1 else ($since | epoch) end) as $since_e
-    | [$events[] | select(.event == "commented" and .created_at > $since and trusted) | markers[]
-        | select(.kind != "hold" or reset_epoch != null)] as $marks
+    | [$events[] | select(.event == "commented" and .created_at > $since and trusted) | .created_at as $at | markers[]
+        | select(.kind != "hold" or reset_epoch != null) | . + {at: $at}] as $marks
     # A hold counts only if no restart marker came after it: a restart consumes the hold.
     | ($marks | to_entries | map(select(.value.kind == "hold" or .value.kind == "restart")) | last
         | if . != null and .value.kind == "hold" then .value else null end) as $hold
     | {
         n: $i.number,
         attempts: ([$marks[] | select(.kind == "attempt")] | length),
+        nudges: [$marks[] | select(.kind == "nudge")],
         ready: $is_ready,
         # Holds count on ready issues only.
         hold: (if $is_ready then $hold else null end),
@@ -213,7 +236,10 @@ def run_state:
         # an older one, so a live Run is never doubled. On a ready issue, a non-live Run from
         # before the last ready label is history. A non-ready issue has no such cut-off: its
         # newest Run stays current until needs-shin follows it.
-        run: ([$runs[] | select((.objective | lc) == "factory \($repo_lc)#\($i.number)")]
+        # A dead Run with no tasks (sf-act died before its first task) is skipped: the next
+        # start makes a new one, and the attempt cap bounds the retries.
+        run: ([$runs[] | select((.objective | lc) == "factory \($repo_lc)#\($i.number)")
+               | select(.state != "dead" or (.tasks | length) > 0)]
               | sort_by(.created) as $rs
               | ([$rs[] | select(.state == "live")] | last)
                 // ($rs | last | if . != null and $is_ready and .created <= $since_e then null else . end)),
@@ -233,26 +259,46 @@ def run_state:
     | [$prs[0][] | select((.headRefName | split("/") | last) as $h | $h == $b or ($h | startswith("\($b)-")))]
     | first;
 
+  # A dispatched task whose worker Orca reported as stopped without reporting: nudge it once
+  # (a nudge marker names the dispatch); stopped again after the nudge, stop.
+  def nudge_actions($c; $r):
+    $r.tasks[] | select(.status == "dispatched") | . as $t
+    | [($r.escalations // [])[] | select(.task == $t.id)] | select(length > 0)
+    | (max_by(.at) | .dispatch) as $d
+    | ([.[] | select(.dispatch == $d) | .at] | max) as $last
+    | ([$c.nudges[] | select(.dispatch == $d) | .at] | max) as $nudged
+    | if $nudged == null then {action: "nudge", issue: $c.n, run: $r.id, task: $t.id, dispatch: $d}
+      elif $last > $nudged then {action: "stop", issue: $c.n, run: $r.id, task: $t.id, dispatch: $d,
+        reason: "\($t.title) worker stopped without reporting, again after a nudge"}
+      else empty end;
+
   def run_actions($c):
     $c.run as $r
     | if $r.state == "live" then
-        $r.tasks[] | select(.status == "ready")
+        nudge_actions($c; $r),
+        ($r.tasks[] | select(.status == "ready")
         | if .title == "ship" then
             pr_for($c.n) as $pr
             | if $pr == null then {action: "stop", issue: $c.n, reason: "ship task ready but no open PR on a branch named \($name)-\($c.n)-*"}
               else {action: "ship", issue: $c.n, run: $r.id, task: .id, pr: $pr.number} end
-          else {action: "advance", issue: $c.n, run: $r.id, task: .id} end
+          else {action: "advance", issue: $c.n, run: $r.id, task: .id} end)
       elif $r.state == "dead" then
         [$r.tasks[] | select(.status == "failed")] as $failed
         | if $c.held then empty
           elif $c.hold != null and ($failed | length) > 0 then
             $failed[] | {action: "restart", issue: $c.n, run: $r.id, task: .id}
-          elif ($failed | length) > 0 then
-            {action: "stop", issue: $c.n, reason: "run \($r.id) task \($failed[0].title) failed"}
-          else {action: "stop", issue: $c.n, reason: "run \($r.id) has no tasks"} end
+          else
+            {action: "stop", issue: $c.n, reason: "run \($r.id) task \($failed[0].title) failed", run: $r.id, task: $failed[0].id}
+          end
       else empty end;
 
-  ([$cands[] | select(.run != null) | run_actions(.)]) as $run_actions
+  # A closed issue (merged) still runs its debrief and lessons tasks.
+  ([$runs[] | select(.state == "live") | . as $r
+    | (.objective | lc | capture("^factory (?<r>[^#]+)#(?<n>[0-9]+)$")) as $o
+    | select($o.r == $repo_lc and ($open | index($o.n | tonumber) | not))
+    | .tasks[] | select(.status == "ready" and (.title == "debrief" or .title == "lessons"))
+    | {action: "advance", issue: ($o.n | tonumber), run: $r.id, task: .id}]) as $closed_actions
+  | ([$cands[] | select(.run != null) | run_actions(.)] + $closed_actions) as $run_actions
   # A restart revives a Run, so it takes a slot a start would otherwise get.
   | ([$run_actions[] | select(.action == "restart") | .run] | unique | length) as $restarting
   | ([$capacity - $restarting, 0] | max) as $capacity
