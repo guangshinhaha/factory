@@ -366,3 +366,195 @@ test_starts_the_issue_readied_first() {
   timeline 9 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"}]'
   assert_eq '[{"action":"start","issue":9}]' "$(state)" "actions"
 }
+
+# Codex review findings, issue #18.
+
+# 1: an older live Run is still the current Run when a newer one is done.
+test_older_live_run_wins_over_a_newer_done_run() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-06T00:00:00Z"}]'
+  runs "[$(run_json run_live 7 2026-11-02T00:00:00Z),$(run_json run_done 7 2026-11-03T00:00:00Z)]"
+  tasks run_live '[{"id":"t1","status":"completed","title":"build"},{"id":"t2","status":"ready","title":"review"}]'
+  tasks run_done '[{"id":"t1","status":"completed","title":"build"}]'
+  assert_eq '[{"action":"advance","issue":7,"run":"run_live","task":"t2"}]' "$(state)" "actions"
+}
+
+# 2: fractional seconds in created_at parse; a created_at that does not parse is an error.
+test_run_created_at_with_fractional_seconds_parses() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7 2099-01-01T00:00:00.123Z)]"
+  tasks run_a '[]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_run_created_at_that_does_not_parse_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7 yesterday)]"
+  tasks run_a '[]'
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "Run run_a created_at [yesterday] is not a UTC ISO-8601 time" "stderr"
+}
+
+# 3: a dead Run on an open issue that is no longer ready still owes its stop, once.
+test_dead_run_on_unreadied_issue_owes_a_stop() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"}]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+}
+
+test_dead_run_already_stopped_owes_nothing_after_needs_shin_is_removed() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"},{"event":"labeled","label":{"name":"needs-shin"},"created_at":"2026-11-03T00:00:00Z"},{"event":"unlabeled","label":{"name":"needs-shin"},"created_at":"2026-11-04T00:00:00Z"}]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_dead_run_on_needs_shin_or_icebox_issue_owes_nothing() {
+  world
+  issues '[{"number":7,"labels":[{"name":"needs-shin"}],"body":""},{"number":8,"labels":[{"name":"icebox"}],"body":""}]'
+  runs "[$(run_json run_a 7),$(run_json run_b 8)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  tasks run_b '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[]' "$(state)" "actions"
+}
+
+# 4: a ready issue whose timeline has no ready label event has no attempt boundary.
+test_timeline_without_a_ready_label_event_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[]'
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: timeline of #7 has no ready label event" "stderr"
+}
+
+# 5: malformed Orca JSON fails closed instead of looking like no Runs.
+test_run_list_with_null_runs_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":null}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Orca Runs not listed" "stderr"
+}
+
+test_task_list_with_null_tasks_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  printf '{"ok":true,"result":{"tasks":null}}\n' | fixture orca orchestration task-list --run run_a --json
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: tasks of Run run_a not listed" "stderr"
+}
+
+# Interrogate findings on the #18 fix: created_at is checked on every Run, not only empty ones.
+bad_created_at_fails() {
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: actions not computed: Run run_a created_at [$1] is not a UTC ISO-8601 time" "stderr"
+}
+
+test_run_with_tasks_and_no_created_at_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs '[{"id":"run_a","objective":"factory acme/app#7"}]'
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  bad_created_at_fails ''
+}
+
+test_run_with_tasks_and_unparseable_created_at_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7 yesterday)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  bad_created_at_fails yesterday
+}
+
+test_run_created_at_with_an_offset_is_an_error() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"labeled","label":{"name":"needs-shin"},"created_at":"2026-11-03T05:00:00Z"},{"event":"unlabeled","label":{"name":"needs-shin"},"created_at":"2026-11-04T00:00:00Z"}]'
+  runs "[$(run_json run_a 7 2026-11-03T08:00:00+08:00)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  bad_created_at_fails 2026-11-03T08:00:00+08:00
+}
+
+# A non-ready issue has no history cut-off: its newest Run is current until needs-shin follows it.
+test_unreadied_issue_dead_run_from_before_a_re_ready_owes_a_stop() {
+  world
+  issues '[{"number":7,"labels":[],"body":""}]'
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-03T00:00:00Z"},{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-04T00:00:00Z"},{"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-11-05T00:00:00Z"}]'
+  runs "[$(run_json run_a 7 2026-11-02T00:00:00Z)]"
+  tasks run_a '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"stop","issue":7,"reason":"run run_a task build failed"}]' "$(state)" "actions"
+}
+
+# fails_with <stderr text>: sf-state exits 1, prints nothing on stdout, and says why.
+fails_with() {
+  status=0
+  out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "$1" "stderr"
+}
+
+test_task_without_an_id_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"status":"ready","title":"review"},null]'
+  fails_with "sf-state: tasks of Run run_a not listed"
+}
+
+test_pr_without_a_number_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t9","status":"ready","title":"ship"}]'
+  prs '[{"headRefName":"someone/app-7-x"}]'
+  fails_with "sf-state: open PRs not listed"
+}
+
+test_ready_label_event_without_a_time_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"}},$(comment "$attempt" 2026-10-01T00:00:00Z)]"
+  fails_with "sf-state: timeline of #7 has a label event with no UTC time"
+}
+
+test_run_list_repeating_its_cursor_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
+  fails_with "sf-state: Orca Runs not listed: run-list repeated cursor [c2]"
+}
