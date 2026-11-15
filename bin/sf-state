@@ -1,0 +1,209 @@
+#!/bin/sh
+# sf-state: print what the factory should do next, as a JSON array, from GitHub and Orca alone.
+# Usage: sf-state [owner/repo]   (default: the repo in the current directory, via gh)
+# Run from the repo's checkout: `factory-concurrency: N` is read from ./CLAUDE.md (default 2).
+# FACTORY_MAX_RUNS caps live `factory */*#*` Runs host-wide (default 4).
+#
+# Actions, one object each, sorted by issue:
+#   {"action":"start","issue":N}                         no Run yet; capacity, attempts and deps allow it
+#   {"action":"advance","issue":N,"run":R,"task":T}      task T of a live Run is ready
+#   {"action":"ship","issue":N,"run":R,"task":T,"pr":P}  the Run's `ship` task is ready; P found by branch
+#   {"action":"restart","issue":N,"run":R,"task":T}      dead Run, its hold marker's reset has passed
+#   {"action":"stop","issue":N,"reason":S}               dead Run with no hold, or 3 attempts since ready
+#   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
+#
+# Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
+# timeline (the last `ready` label event, and factory marker comments after it), open PRs,
+# and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses.
+# Any failed read prints nothing on stdout and exits 1, so no action runs on partial state.
+set -eu
+
+FACTORY_MAX_RUNS_DEFAULT=4
+FACTORY_CONCURRENCY_DEFAULT=2
+
+die() {
+  echo "sf-state: $*" >&2
+  exit 1
+}
+
+command -v jq > /dev/null 2>&1 || die "jq not found on PATH"
+
+repo=${1:-}
+if [ -z "$repo" ]; then
+  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || die "repo not found for the current directory (gh repo view failed)"
+fi
+case "$repo" in
+  */*) ;;
+  *) die "repo [$repo] is not owner/repo" ;;
+esac
+
+max_runs=${FACTORY_MAX_RUNS:-$FACTORY_MAX_RUNS_DEFAULT}
+case "$max_runs" in
+  '' | *[!0-9]*) die "FACTORY_MAX_RUNS [$max_runs] is not a whole number" ;;
+esac
+
+concurrency=$FACTORY_CONCURRENCY_DEFAULT
+if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-concurrency:' CLAUDE.md; then
+  concurrency=$(sed -n 's/^[[:space:]]*factory-concurrency:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
+  [ -n "$concurrency" ] || die "factory-concurrency in CLAUDE.md is not a whole number"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-state.XXXXXX") || die "temp dir not created"
+trap 'rm -rf "$tmp"' EXIT
+
+# Open issues, once. `--label`/`--search` would go through the search API (shinfactory#175).
+gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "$tmp/issues.json" \
+  || die "open issues not listed (gh issue list failed)"
+jq -e 'type == "array"' "$tmp/issues.json" > /dev/null 2>&1 || die "open issues not listed: gh issue list printed no JSON array"
+
+gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName > "$tmp/prs.json" \
+  || die "open PRs not listed (gh pr list failed)"
+jq -e 'type == "array"' "$tmp/prs.json" > /dev/null 2>&1 || die "open PRs not listed: gh pr list printed no JSON array"
+
+# Timelines of ready issues only (the same test as `ready` in the jq program below).
+: > "$tmp/timelines.jsonl"
+for n in $(jq -r '.[] | [.labels[].name] as $l | select(($l | index("ready")) and ($l | index("needs-shin") | not) and ($l | index("icebox") | not)) | .number' "$tmp/issues.json" | tr -d '\r'); do
+  gh api "repos/$repo/issues/$n/timeline" --paginate > "$tmp/timeline" \
+    || die "timeline of #$n not read (gh api failed)"
+  jq -cs --argjson n "$n" 'if length > 0 and all(.[]; type == "array") then {n: $n, events: add} else error end' \
+    "$tmp/timeline" >> "$tmp/timelines.jsonl" 2> /dev/null \
+    || die "timeline of #$n not read: gh api printed no JSON array"
+done
+
+# Every factory Run host-wide (run-list is host-wide), page by page, with its tasks.
+factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
+: > "$tmp/runs.jsonl"
+cursor=
+while :; do
+  if [ -n "$cursor" ]; then
+    orca orchestration run-list --json --full --limit 100 --cursor "$cursor" > "$tmp/page" \
+      || die "Orca Runs not listed (orca orchestration run-list failed)"
+  else
+    orca orchestration run-list --json --full --limit 100 > "$tmp/page" \
+      || die "Orca Runs not listed (orca orchestration run-list failed)"
+  fi
+  jq -e '.ok == true' "$tmp/page" > /dev/null 2>&1 || die "Orca Runs not listed: $(head -c 300 "$tmp/page")"
+  jq -r --arg re "$factory_objective" \
+    '.result.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv' \
+    "$tmp/page" | tr -d '\r' > "$tmp/factory-runs.tsv"
+  while IFS="$(printf '\t')" read -r id objective created; do
+    orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
+      || die "tasks of Run $id not listed (orca orchestration task-list failed)"
+    jq -c -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
+      'select(.ok == true) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
+      "$tmp/tasks" >> "$tmp/runs.jsonl" || die "tasks of Run $id not listed: $(head -c 300 "$tmp/tasks")"
+  done < "$tmp/factory-runs.tsv"
+  cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')
+  [ -n "$cursor" ] || break
+done
+
+jq -n -c \
+  --arg repo "$repo" \
+  --argjson concurrency "$concurrency" \
+  --argjson max_runs "$max_runs" \
+  --slurpfile issues "$tmp/issues.json" \
+  --slurpfile prs "$tmp/prs.json" \
+  --slurpfile timelines "$tmp/timelines.jsonl" \
+  --slurpfile runs "$tmp/runs.jsonl" '
+def lc: ascii_downcase;
+def has_label($l): any(.labels[]; .name == $l);
+def ready: has_label("ready") and (has_label("needs-shin") or has_label("icebox") | not);
+
+# Factory marker comments, <!-- factory:{"kind":...} -->, from people with write access only,
+# so a passer-by cannot hold, stop or restart an issue.
+def trusted: (.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a);
+def markers: [(.body // "") | scan("<!-- factory:(\\{.*?\\}) -->") | .[0] | (try fromjson catch empty)];
+# A hold reset must be UTC ISO-8601 (2026-11-15T10:00:00Z); a hold without one is ignored.
+def reset_epoch: try (.reset | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null;
+
+# #M refs on a `Depends on` line (heading, bold or plain), and on the list lines right after it
+# (`#3`, `- #3`, `1. #3`, `- [ ] #3`). Cross-repo refs (owner/repo#M) are ignored.
+def refs: [scan("(?<![A-Za-z0-9_./-])#([0-9]+)") | .[0] | tonumber];
+def deps:
+  reduce ((.body // "") | gsub("\\*\\*"; "") | split("\n") | .[] | rtrimstr("\r")) as $l ({in: false, refs: []};
+    if ($l | test("^\\s*(#+\\s+)?depends on\\b"; "i")) then .in = true | .refs += ($l | refs)
+    elif .in and ($l | test("^\\s*$")) then .
+    elif .in and ($l | test("^\\s*(([-*+]|[0-9]+\\.)\\s+)?(\\[[ xX]\\]\\s+)?#[0-9]+")) then .refs += ($l | refs)
+    else .in = false end)
+  | .refs | unique;
+
+# dead: a failed task, or no tasks 10 minutes after creation (sf-act died between run-create and
+# task-create). A younger Run with no tasks is live: sf-act is still building its DAG.
+# done: every task completed.
+def run_state:
+  if (.tasks | length) == 0 then
+    (if ((.created_at | try fromdateiso8601 catch 0) + 600) > now then "live" else "dead" end)
+  elif any(.tasks[]; .status == "failed") then "dead"
+  elif all(.tasks[]; .status == "completed") then "done"
+  else "live" end;
+
+($repo | lc) as $repo_lc
+| ($repo | split("/") | .[1]) as $name
+| ($runs | map(. + {state: run_state})) as $runs
+| ($issues[0] | map(.number)) as $open
+| ($timelines | map({key: (.n | tostring), value: .events}) | from_entries) as $tl
+| ([$runs[] | select(.state == "live")] | length) as $host_live
+| ([$runs[] | select(.state == "live" and (.objective | lc | startswith("factory \($repo_lc)#")))] | length) as $repo_live
+
+| [ $issues[0][] | select(ready) | . as $i
+    | ($tl[$i.number | tostring] // []) as $events
+    | ([$events[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
+    | [$events[] | select(.event == "commented" and .created_at > $since and trusted) | markers[]
+        | select(.kind != "hold" or reset_epoch != null)] as $marks
+    # A hold counts only if no restart marker came after it: a restart consumes the hold.
+    | ($marks | to_entries | map(select(.value.kind == "hold" or .value.kind == "restart")) | last
+        | if . != null and .value.kind == "hold" then .value else null end) as $hold
+    | {
+        n: $i.number,
+        attempts: ([$marks[] | select(.kind == "attempt")] | length),
+        hold: $hold,
+        held: ($hold != null and ($hold | reset_epoch) > now),
+        deps: [$i | deps[] | select(. as $d | $open | index($d))],
+        since: $since,
+        # The newest Run for the issue. One from before the last ready label is history unless
+        # it is still live (re-readied mid-Run): a live Run is never doubled.
+        run: ([$runs[] | select((.objective | lc) == "factory \($repo_lc)#\($i.number)")]
+              | sort_by(.created_at) | last
+              | if . != null and .created_at <= $since and .state != "live" then null else . end)
+      }
+  ] as $cands
+
+| (if any($cands[]; .held) then 0
+   else [([($concurrency - $repo_live), ($max_runs - $host_live)] | min), 0] | max
+   end) as $capacity
+
+| def pr_for($n):
+    "\($name)-\($n)" as $b
+    | [$prs[0][] | select((.headRefName | split("/") | last) as $h | $h == $b or ($h | startswith("\($b)-")))]
+    | first;
+
+  def run_actions($c):
+    $c.run as $r
+    | if $r.state == "live" then
+        $r.tasks[] | select(.status == "ready")
+        | if .title == "ship" then
+            pr_for($c.n) as $pr
+            | if $pr == null then {action: "stop", issue: $c.n, reason: "ship task ready but no open PR on a branch named \($name)-\($c.n)-*"}
+              else {action: "ship", issue: $c.n, run: $r.id, task: .id, pr: $pr.number} end
+          else {action: "advance", issue: $c.n, run: $r.id, task: .id} end
+      elif $r.state == "dead" then
+        [$r.tasks[] | select(.status == "failed")] as $failed
+        | if $c.held then empty
+          elif $c.hold != null and ($failed | length) > 0 then
+            $failed[] | {action: "restart", issue: $c.n, run: $r.id, task: .id}
+          elif ($failed | length) > 0 then
+            {action: "stop", issue: $c.n, reason: "run \($r.id) task \($failed[0].title) failed"}
+          else {action: "stop", issue: $c.n, reason: "run \($r.id) has no tasks"} end
+      else empty end;
+
+  ([$cands[] | select(.run != null) | run_actions(.)]) as $run_actions
+  # A restart revives a Run, so it takes a slot a start would otherwise get.
+  | ([$run_actions[] | select(.action == "restart") | .run] | unique | length) as $restarting
+  | ([$capacity - $restarting, 0] | max) as $capacity
+  # Oldest ready label first, then lowest issue number.
+  | ($cands | map(select(.run == null)) | sort_by(.since, .n)) as $idle
+  | ([$idle[] | select(.attempts >= 3) | {action: "stop", issue: .n, reason: "\(.attempts) attempts since it was last labelled ready"}]) as $stops
+  | ([$idle[] | select(.attempts < 3 and (.deps | length) > 0) | {action: "hold", issue: .n, reason: "depends on open \(.deps | map("#\(.)") | join(", "))"}]) as $holds
+  | ([$idle[] | select(.attempts < 3 and (.deps | length) == 0)] | .[0:$capacity] | map({action: "start", issue: .n})) as $starts
+  | $run_actions + $stops + $holds + $starts | sort_by(.issue)
+'
