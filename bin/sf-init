@@ -85,8 +85,9 @@ while read -r kind url; do
     *) host='' path='' ;;
   esac
   host=${host##*@}
-  [ "${host%:*}" = github.com ] && [ "${path#/}" = "$(lc "$repo")" ] \
-    || usage_error "workspace [$ws] origin$([ "$kind" = fetch ] || echo " $kind") URL is [$url], not github.com/$repo"
+  if [ "${host%:*}" != github.com ] || [ "${path#/}" != "$(lc "$repo")" ]; then
+    usage_error "workspace [$ws] origin$([ "$kind" = fetch ] || echo " $kind") URL is [$url], not github.com/$repo"
+  fi
 done << EOF
 $urls
 EOF
