@@ -11,6 +11,10 @@
 # turned into "_". Run `fake-cli --key <args...>` to print a key. Keys can
 # collide ("a b" and "a_b"), so pair a replay with assert_called when it matters.
 # A call with no fixture fails with status 97 and names the file it looked for.
+#
+# Replies that change between calls: <key>.1.out, <key>.2.out, ... (each with its own
+# optional .err/.exit) are replayed in order, one per call; the last repeats.
+# Stdin: when an arg is "-" (gh's --body-file -), stdin is appended to $FAKE_LOG.stdin.
 set -u
 
 if [ "${1:-}" = --key ]; then
@@ -27,8 +31,22 @@ if [ -n "${FAKE_LOG:-}" ]; then
   printf '%s\n' "$tool${*:+ $*}" >> "$FAKE_LOG"
 fi
 
+for arg in "$@"; do
+  if [ "$arg" = - ] && [ -n "${FAKE_LOG:-}" ]; then
+    cat >> "$FAKE_LOG.stdin"
+    break
+  fi
+done
+
 key=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
 base="${FAKE_FIXTURES:-}/$tool/$key"
+
+if [ -n "${FAKE_FIXTURES:-}" ] && [ -f "$base.1.out" ]; then
+  n=$(($(cat "$base.calls" 2> /dev/null || echo 0) + 1))
+  echo "$n" > "$base.calls"
+  while [ "$n" -gt 1 ] && [ ! -f "$base.$n.out" ]; do n=$((n - 1)); done
+  base=$base.$n
+fi
 
 if [ -z "${FAKE_FIXTURES:-}" ] || [ ! -f "$base.out" ]; then
   echo "fake $tool: no fixture for \"$tool $*\" (missing $base.out)" >&2

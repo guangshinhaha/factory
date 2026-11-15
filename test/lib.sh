@@ -47,3 +47,43 @@ assert_not_called() {
     fail "call logged but should not be: [$1]"
   fi
 }
+
+# fixture <tool> <args...>: stdin becomes the fake's stdout for exactly those args.
+# Sets $tool and $key for fixture_exit, so feed it with < or <<, not a pipe (a pipe runs it in a subshell). Call it again to change the world between runs.
+fixture() {
+  tool=$1
+  shift
+  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@")
+  mkdir -p "$FAKE_FIXTURES/$tool"
+  for f in "$FAKE_FIXTURES/$tool/$key".*; do
+    case "${f##*/}" in "$key".out | "$key".err | "$key".exit | "$key".calls | "$key".[0-9]*) rm -f "$f" ;; esac
+  done
+  cat > "$FAKE_FIXTURES/$tool/$key.out"
+}
+
+# fixture_exit <status> [stderr]: the last fixture's call exits <status>, printing stderr.
+fixture_exit() {
+  echo "$1" > "$FAKE_FIXTURES/$tool/$key.exit"
+  printf '%s\n' "${2:-}" > "$FAKE_FIXTURES/$tool/$key.err"
+}
+
+# fixture_seq <n> <tool> <args...>: stdin is the reply to the nth call with those args (see
+# fake-cli); reply 1 must exist. fixture_exit then applies to reply n.
+fixture_seq() {
+  n=$1
+  tool=$2
+  shift 2
+  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@").$n
+  mkdir -p "$FAKE_FIXTURES/$tool"
+  cat > "$FAKE_FIXTURES/$tool/$key.out"
+}
+
+# count_calls <prefix>: how many logged calls start with <prefix>.
+count_calls() {
+  grep -c -F -- "$1" "$FAKE_LOG" 2> /dev/null || :
+}
+
+# Everything piped to a fake through "-" (gh --body-file -), in call order.
+fake_stdin() {
+  cat "$FAKE_LOG.stdin" 2> /dev/null || :
+}

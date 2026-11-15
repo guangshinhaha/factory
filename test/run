@@ -3,7 +3,7 @@
 # Usage: test/run [file...]   (default: test/*_test.sh)
 #
 # Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
-# $FACTORY_FAKES (default test/fakes). The guard dir holds gh and orca shims
+# $FACTORY_FAKES (default test/fakes). The guard dir holds gh, orca and gantry-* gate shims
 # that log and exit 99, so a call that finds no fake never reaches the real
 # CLI, and any guard hit fails the test even if the test ignored the error.
 set -u
@@ -48,6 +48,8 @@ for file in "$@"; do
     mkdir "$tmp/guard" "$tmp/work"
     write_guard "$tmp/guard" gh "$tmp/guard.log"
     write_guard "$tmp/guard" orca "$tmp/guard.log"
+    write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
+    write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
     : > "$tmp/calls.log"
     (
       FACTORY_ROOT=$root
@@ -61,6 +63,8 @@ for file in "$@"; do
       HOME=$tmp/work/home
       mkdir "$HOME"
       unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+      # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
+      unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
       export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
       # shellcheck source=test/lib.sh
       . "$root/test/lib.sh"

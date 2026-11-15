@@ -1,0 +1,267 @@
+#!/bin/sh
+# sf-ship: the factory's merge exit. Reruns the evidence gate and verdict check itself, then per
+# the base branch's `shinstack-mode` either merges (auto) or marks the PR ready for review and
+# leaves it (supervised, manual, or no declaration).
+# Usage: sf-ship [--repo owner/repo] <issue> <pr>
+# Run it in the PR branch's worktree, checked out at the PR head with a clean tree.
+#
+# Steps:
+#  1. PR already merged: exit 0. Closed unmerged: stop.
+#  2. The worktree must be on the PR's branch at the PR's head; a head that moved is refused (stop).
+#  3. `gantry-gate-evidence [--bug]` (`--bug` when the issue is labelled bug), then
+#     `gantry-verdict-check --no-label`: every PR needs a PASS verdict at its head, whatever its labels. Gate exit 1 stops; exit 2 is retried next fire.
+#  4. Mode from CLAUDE.md on origin/<base> (never the PR's own copy, which could flip itself to
+#     auto): `shinstack-mode: auto` merges, unless `shinstack-mode.merge: ask`;
+#     `shinstack-mode.merge: auto` merges in any mode. Otherwise: `gh pr ready`, exit 0.
+#  5. Marks the PR ready, then waits up to SF_SHIP_WAIT seconds (default 600), polling every
+#     SF_SHIP_POLL (default 30), while mergeability is UNKNOWN or required checks are pending.
+#     A failed required check stops. Still BLOCKED with no required checks reported when the wait
+#     runs out: try the merge, so gh's refusal (a required review, say) stops.
+#  6. Conflicting or behind its base: the first time since the issue was last labelled ready,
+#     rebase onto origin/<base> (never merge), push through `gantry-gate-evidence
+#     --force-with-lease`, comment a rebase marker on the issue, exit 3 so review and verify
+#     rerun on the new head. A second time, or a rebase with conflicts: stop. BEHIND counts as a
+#     conflict, so a base that moves twice during review stops the issue.
+#  7. `gh pr merge --squash --match-head-commit <head>` (never --admin, --auto or the REST merge
+#     endpoint), then read the PR back. Refused: once, rerun the last green ci.yml run for the
+#     head (gantry#134: a title/body edit can start a skipped run that hides required checks),
+#     wait again and retry the merge; refused again: stop with gh's refusal text. The run's
+#     attempt count on GitHub records the rerun, so it happens once per head across fires.
+#
+# Stopping runs sf-stop, so the issue ends `needs-shin` with the reason.
+# Last line of stdout: `MERGED <sha>`, `PARKED`, `STOPPED: <reason>`, `RETRY: <reason>` or
+# `REREVIEW: <reason>`.
+# Exit 0: merged (now or already) or parked. 1: stopped (when sf-stop itself failed, fail the
+# ship task: sf-state then owes the stop). 2: transient failure or checks still pending; run it
+# again next fire. 3: rebased and pushed; rerun review and verify, then ship again.
+# Bad arguments also exit 2, with a message on stderr.
+set -u
+
+me=sf-ship
+bindir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/factory.sh
+. "$bindir/../lib/factory.sh"
+
+repo=
+if [ "${1:-}" = --repo ]; then
+  [ $# -ge 2 ] || usage_error "--repo needs owner/repo"
+  repo=$2
+  shift 2
+fi
+[ $# -eq 2 ] || usage_error "usage: sf-ship [--repo owner/repo] <issue> <pr>"
+issue=$1
+pr=$2
+is_number "$issue" || usage_error "issue [$issue] is not a number"
+is_number "$pr" || usage_error "PR [$pr] is not a number"
+wait_s=${SF_SHIP_WAIT:-600}
+poll_s=${SF_SHIP_POLL:-30}
+is_number "$wait_s" || usage_error "SF_SHIP_WAIT [$wait_s] is not a whole number of seconds"
+is_number "$poll_s" || usage_error "SF_SHIP_POLL [$poll_s] is not a whole number of seconds"
+need_jq
+repo=$(resolve_repo "$repo") || exit 2
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-ship.XXXXXX") || die "temp dir not created"
+trap 'rm -rf "$tmp"' EXIT
+
+retry() {
+  echo "RETRY: $*"
+  exit 2
+}
+
+stop() {
+  sh "$bindir/sf-stop" --repo "$repo" "$issue" "$1" >&2 || echo "$me: sf-stop failed; fail the ship task so sf-state owes the stop" >&2
+  echo "STOPPED: $1"
+  exit 1
+}
+
+# pr_view: read the PR into $tmp/pr.json and set state, head, branch, base, draft, mergeable, merge_state.
+pr_view() {
+  gh pr view "$pr" -R "$repo" --json state,isDraft,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit > "$tmp/pr.json" \
+    || retry "PR #$pr not read (gh pr view failed)"
+  state='' head='' branch='' base='' draft='' mergeable='' merge_state='' merge_sha=''
+  jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
+  eval "$(jq -r '@sh "state=\(.state) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+}
+
+merged() {
+  echo "$me: PR #$pr merged as $merge_sha"
+  echo "MERGED $merge_sha"
+  exit 0
+}
+
+# --- 1. PR state -------------------------------------------------------------------------------
+pr_view
+[ "$state" = MERGED ] && merged
+[ "$state" = OPEN ] || stop "PR #$pr is $state without a merge"
+start_head=$head
+
+# --- 2. Worktree at the PR head ----------------------------------------------------------------
+local_branch=$(git symbolic-ref --short -q HEAD) || stop "sf-ship ran in a worktree with a detached HEAD, not on PR #$pr's branch $branch"
+[ "$local_branch" = "$branch" ] || stop "sf-ship ran in a worktree on branch $local_branch, not PR #$pr's branch $branch"
+local_head=$(git rev-parse HEAD) || retry "worktree HEAD not read (git rev-parse failed)"
+[ -z "$(git status --porcelain)" ] || stop "sf-ship ran in a worktree with uncommitted or untracked files on $branch"
+[ "$local_head" = "$head" ] || stop "refused: PR #$pr head moved: the PR is at $head but the worktree is at $local_head, which was not reviewed at the PR head"
+
+# --- 3. Gates ----------------------------------------------------------------------------------
+labels=$(gh issue view "$issue" -R "$repo" --json labels -q '[.labels[].name] | join(",")') \
+  || retry "labels of #$issue not read (gh issue view failed)"
+bug=
+case ",$labels," in
+  *,bug,*) bug=--bug ;;
+esac
+
+# run_gate <name> <args...>: 0 pass; stops on 1; retries on anything else. Output in $tmp/gate.
+run_gate() {
+  name=$1
+  status=0
+  "$@" > "$tmp/gate" 2>&1 || status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) retry "$name exited $status: $(tr '\n' ' ' < "$tmp/gate")" ;;
+  esac
+}
+
+# shellcheck disable=SC2086 # $bug is empty or one flag
+run_gate gantry-gate-evidence $bug \
+  || stop "evidence gate failed: $(tr '\n' ' ' < "$tmp/gate")"
+run_gate gantry-verdict-check --pr "$pr" --repo "$repo" --no-label \
+  || stop "verdict check failed: $(tr '\n' ' ' < "$tmp/gate")"
+
+# --- 4. Mode from the base branch --------------------------------------------------------------
+git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
+claude_md=$(git show "origin/$base:CLAUDE.md" 2> /dev/null) || claude_md=
+mode=$(printf '%s\n' "$claude_md" | sed -n 's/^[[:space:]]*shinstack-mode:[[:space:]]*\([a-z]*\)[[:space:]]*$/\1/p' | head -n 1)
+merge_mode=$(printf '%s\n' "$claude_md" | sed -n 's/^[[:space:]]*shinstack-mode\.merge:[[:space:]]*\([a-z]*\)[[:space:]]*$/\1/p' | head -n 1)
+auto_merge=0
+if [ "$merge_mode" = auto ] || { [ "$mode" = auto ] && [ "$merge_mode" != ask ]; }; then
+  auto_merge=1
+fi
+
+if [ "$draft" = true ]; then
+  gh pr ready "$pr" -R "$repo" > /dev/null 2>&1 || retry "PR #$pr still a draft (gh pr ready failed)"
+fi
+
+if [ "$auto_merge" = 0 ]; then
+  echo "$me: shinstack-mode ${mode:-supervised} on $base: PR #$pr left ready for review"
+  echo "PARKED"
+  exit 0
+fi
+
+# --- 5. Wait for checks ------------------------------------------------------------------------
+# wait_mergeable: returns 0 to merge, 3 on a conflict; stops on a failed check; retries when the
+# wait runs out.
+wait_mergeable() {
+  deadline=$(($(date +%s) + wait_s))
+  while :; do
+    pr_view
+    [ "$state" = MERGED ] && merged
+    [ "$state" = OPEN ] || stop "PR #$pr is $state without a merge"
+    [ "$head" = "$start_head" ] || stop "refused: PR #$pr head moved from $start_head to $head during ship"
+    case "$mergeable:$merge_state" in
+      CONFLICTING:* | *:DIRTY | *:BEHIND) return 3 ;;
+    esac
+
+    : > "$tmp/checks.err"
+    gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
+    if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
+      if grep -q 'no required checks reported' "$tmp/checks.err"; then
+        echo '[]' > "$tmp/checks"
+      else
+        retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+      fi
+    fi
+    failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
+    [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
+    pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
+    if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
+      pending="${pending:+$pending, }mergeability"
+    elif [ "$merge_state" = BLOCKED ] && jq -e 'length == 0' "$tmp/checks" > /dev/null; then
+      pending="required checks not reported yet"
+    fi
+    [ -n "$pending" ] || return 0
+
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      # BLOCKED with no required checks will not change by waiting (a required review, say):
+      # let gh decide, so a refusal stops instead of retrying every fire.
+      [ "$pending" = "required checks not reported yet" ] && return 0
+      retry "PR #$pr still pending after ${wait_s}s: $pending"
+    fi
+    echo "$me: waiting on $pending" >&2
+    sleep "$poll_s"
+  done
+}
+
+# --- 6. Conflict: rebase once ------------------------------------------------------------------
+rebase_once() {
+  marks=$(markers_since_ready "$repo" "$issue") || retry "timeline of #$issue not read (gh api failed)"
+  if printf '%s\n' "$marks" | jq -e 'any(.[]; .kind == "rebase")' > /dev/null; then
+    stop "PR #$pr conflicts with $base again after one rebase"
+  fi
+  git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
+  if ! git rebase -q "origin/$base" > "$tmp/rebase" 2>&1; then
+    files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+    git rebase --abort > /dev/null 2>&1 || :
+    git reset -q --hard "$start_head" 2> /dev/null || :
+    stop "rebase of PR #$pr onto $base conflicts in: ${files:-$(tr '\n' ' ' < "$tmp/rebase")}"
+  fi
+  new_head=$(git rev-parse HEAD)
+  status=0
+  # shellcheck disable=SC2086 # $bug is empty or one flag
+  gantry-gate-evidence $bug --force-with-lease > "$tmp/gate" 2>&1 || status=$?
+  case "$status" in
+    0) ;;
+    1)
+      git reset -q --hard "$start_head" || :
+      stop "evidence gate failed after rebasing onto $base: $(tr '\n' ' ' < "$tmp/gate")"
+      ;;
+    *)
+      # Exit 2 may still come after the push landed: then the PR is at the new head already.
+      pr_view
+      if [ "$head" != "$new_head" ]; then
+        git reset -q --hard "$start_head" || :
+        retry "gantry-gate-evidence exited $status after rebasing onto $base: $(tr '\n' ' ' < "$tmp/gate")"
+      fi
+      ;;
+  esac
+  marker=$(jq -cn --argjson pr "$pr" --arg from "$start_head" --arg to "$new_head" '{kind: "rebase", pr: $pr, from: $from, to: $to}')
+  printf 'factory: rebased PR #%s onto %s (%s -> %s); review and verify rerun on the new head.\n\n<!-- factory:%s -->\n' \
+    "$pr" "$base" "$start_head" "$new_head" "$marker" \
+    | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
+    || stop "rebase marker not posted on #$issue after pushing $new_head (gh issue comment failed)"
+  echo "REREVIEW: PR #$pr rebased onto $base, now at $new_head"
+  exit 3
+}
+
+# --- 7. Merge ----------------------------------------------------------------------------------
+reran=0
+while :; do
+  wait_mergeable || rebase_once
+  status=0
+  gh pr merge "$pr" -R "$repo" --squash --match-head-commit "$start_head" > "$tmp/merge" 2>&1 || status=$?
+  refusal=$(tr '\n' ' ' < "$tmp/merge")
+  pr_view
+  [ "$state" = MERGED ] && merged
+  if [ "$status" -eq 0 ]; then
+    retry "gh pr merge exited 0 but PR #$pr reads back $state"
+  fi
+  # gantry#134 workaround, once per head: the newest ci.yml run for the head that is green or
+  # already rerun (attempt > 1). GitHub keeps the attempt count, so "once" holds across fires.
+  gh run list -R "$repo" --workflow ci.yml --commit "$start_head" --limit 20 --json databaseId,attempt,status,conclusion > "$tmp/runs" \
+    || retry "ci runs of $start_head not listed (gh run list failed)"
+  run=$(jq -r '[.[] | select(.conclusion == "success" or .attempt > 1)] | first // empty | "\(.databaseId) \(.attempt) \(.status)"' "$tmp/runs") \
+    || retry "ci runs of $start_head not listed: gh run list printed no JSON array"
+  [ -n "$run" ] || stop "merge refused: $refusal"
+  # shellcheck disable=SC2086 # three words: id, attempt, status
+  set -- $run
+  # reran: this process already reran it, even if GitHub's list still lags at attempt 1.
+  if [ "$2" -gt 1 ] || [ "$reran" = 1 ]; then
+    [ "$3" = completed ] || retry "merge refused while ci run $1 reruns: $refusal"
+    stop "merge refused: $refusal"
+  fi
+  echo "$me: merge refused ($refusal); rerunning green ci run $1 once (gantry#134)" >&2
+  gh run rerun "$1" -R "$repo" > /dev/null 2>&1 || retry "ci run $1 not rerun (gh run rerun failed)"
+  reran=1
+  # Give the rerun time to show as pending, so the wait doesn't read the old green checks.
+  sleep "$poll_s"
+done
