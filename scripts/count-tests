@@ -1,0 +1,9 @@
+#!/bin/sh
+# Prints how many test_* functions test/*_test.sh define, without running them.
+# Uses the same pattern as test/run. Usage: scripts/count-tests
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+sed -n 's/^\(test_[A-Za-z0-9_]*\)[[:space:]]*().*/\1/p' test/*_test.sh | wc -l | tr -d ' '
