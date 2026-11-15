@@ -269,6 +269,18 @@ test_push_url_of_another_repo_exits_2_without_writes() {
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
 
+# git pushes to every push URL, not only the first.
+test_second_push_url_of_another_host_exits_2_without_writes() {
+  world
+  git -C "$WS" remote set-url --push origin git@github.com:acme/app.git
+  git -C "$WS" remote set-url --add --push origin https://evil.example/acme/app.git
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 2 "$status" "exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "origin push URL is [https://evil.example/acme/app.git], not github.com/acme/app"
+  assert_eq 0 "$(count_calls "gh ")" "gh calls"
+}
+
 # The name carries the owner, so other/app's automation is not acme/app's.
 test_automation_of_a_same_named_repo_does_not_count() {
   world
@@ -297,16 +309,18 @@ test_target_repo_hooks_do_not_block_setup() {
   world
   hooks=$WS/.git/hooks
   mkdir -p "$hooks"
-  for h in post-checkout pre-commit commit-msg pre-push; do
+  for h in post-checkout pre-commit commit-msg pre-push reference-transaction; do
     printf '#!/bin/sh\necho "%s: node_modules missing" >&2\nexit 1\n' "$h" > "$hooks/$h"
     chmod +x "$hooks/$h"
   done
+  git -C "$TEST_TMP/seed" commit -q --allow-empty -m ahead # the workspace's fetch updates a ref
+  git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
   status=0
   sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
   assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
   assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
-  for h in post-checkout pre-commit commit-msg pre-push; do
+  for h in post-checkout pre-commit commit-msg pre-push reference-transaction; do
     [ -x "$hooks/$h" ] || fail "hook $h removed from the workspace"
   done
 }
@@ -322,11 +336,13 @@ test_fork_pr_from_factory_init_is_not_the_setup_pr() {
 
 test_unreadable_pr_list_exits_1_without_a_push() {
   world
-  open_pr '[{"url":"x"}]'
-  status=0
-  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
-  assert_eq 1 "$status" "exit status"
-  assert_contains "$(cat "$TEST_TMP/err")" "open PRs from factory-init not read"
+  for out in '[{"url":"x"}]' ''; do
+    printf '%s' "$out" | fixture gh pr list -R "$REPO" --head factory-init --state open --json url,isCrossRepository
+    status=0
+    sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+    assert_eq 1 "$status" "exit status for [$out]"
+    assert_contains "$(cat "$TEST_TMP/err")" "open PRs from factory-init not read"
+  done
   assert_eq "" "$(git -C "$ORIGIN" for-each-ref refs/heads/factory-init)" "factory-init on origin"
 }
 

@@ -54,12 +54,20 @@ fi
 [ -d "$ws" ] || usage_error "workspace [$ws] is not a directory"
 # git's own form of the path (C:/... on Windows), which native tools like orca read too.
 ws=$(git -C "$ws" rev-parse --show-toplevel 2> /dev/null) || usage_error "workspace [$ws] is not a git checkout"
-# Both origin URLs must be github.com/<repo>: git push uses the push URL when one is set.
-# GitHub names ignore case.
+# Every origin URL must be github.com/<repo>: git push uses the push URLs when any are set, and
+# pushes to each of them. GitHub names ignore case.
 lc() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'; }
-for flag in '' --push; do
+urls=
+for kind in fetch push; do
+  flag=
+  [ "$kind" = fetch ] || flag=--push
   # shellcheck disable=SC2086 # $flag is empty or one word
-  url=$(git -C "$ws" remote get-url $flag origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
+  u=$(git -C "$ws" remote get-url --all $flag origin 2> /dev/null) || usage_error "workspace [$ws] has no origin remote"
+  urls="$urls$(printf '%s\n' "$u" | sed "s/^/$kind /")
+"
+done
+while read -r kind url; do
+  [ -n "$kind" ] || continue
   u=$(lc "$url")
   u=${u%/}
   u=${u%.git}
@@ -78,8 +86,10 @@ for flag in '' --push; do
   esac
   host=${host##*@}
   [ "${host%:*}" = github.com ] && [ "${path#/}" = "$(lc "$repo")" ] \
-    || usage_error "workspace [$ws] origin${flag:+ push} URL is [$url], not github.com/$repo"
-done
+    || usage_error "workspace [$ws] origin$([ "$kind" = fetch ] || echo " $kind") URL is [$url], not github.com/$repo"
+done << EOF
+$urls
+EOF
 
 # 1. Labels. GitHub label names are case-insensitive.
 have=$(gh label list -R "$repo" --limit 1000 --json name -q '.[].name') \
@@ -106,8 +116,6 @@ default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name
   || die "default branch of $repo not read (gh repo view failed)"
 [ -n "$default" ] || die "default branch of $repo is empty (gh repo view)"
 [ "$default" != "$branch" ] || die "default branch of $repo is $branch, the branch sf-init pushes"
-git -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
-  || die "origin/$default not fetched in $ws (git fetch failed)"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-init.XXXXXX") || die "temp dir not created"
 wt=
@@ -122,6 +130,9 @@ trap 'exit 1' HUP INT TERM
 # through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks.
 nohooks=$tmp/no-hooks
 mkdir "$nohooks" || die "temp dir not created"
+
+git -c core.hooksPath="$nohooks" -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
+  || die "origin/$default not fetched in $ws (git fetch failed)"
 
 # Blobs by id, never `git show <ref>:<path>`: Git Bash rewrites that argument as a path list.
 tree=$(git -C "$ws" ls-tree "origin/$default" -- CLAUDE.md .github/gantry-risky-paths) \
@@ -160,7 +171,7 @@ else
   gh pr list -R "$repo" --head "$branch" --state open --json url,isCrossRepository > "$tmp/prs" \
     || die "open PRs from $branch not read (gh pr list failed)"
   # A fork's PR can come from a branch with the same name; it is not the setup PR.
-  pr=$(jq -r '
+  pr=$(jq -nr 'input |
     if type == "array" and all(.[]; (.url | type == "string") and (.isCrossRepository | type == "boolean"))
     then [.[] | select(.isCrossRepository == false)][0].url // "" else error("no PR array") end' "$tmp/prs" 2> /dev/null) \
     || die "open PRs from $branch not read (gh pr list printed no array of PRs with url and isCrossRepository)"
