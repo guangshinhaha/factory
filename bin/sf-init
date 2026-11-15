@@ -82,6 +82,7 @@ done
 # 2. Files, from the default branch as it is on GitHub.
 default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name) && [ -n "$default" ] \
   || die "default branch of $repo not read (gh repo view failed)"
+[ "$default" != "$branch" ] || die "default branch of $repo is $branch, the branch sf-init pushes"
 git -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
   || die "origin/$default not fetched in $ws (git fetch failed)"
 
