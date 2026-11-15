@@ -24,6 +24,7 @@ Before a PR: `scripts/check` passes.
 
 Hooks and CI come from gantry (`lefthook.yml`, `.github/workflows/ci.yml`).
 A task is done only when the pre-push checks pass. Never use `--no-verify`.
+Merge only with `gh pr merge --squash --match-head-commit <sha>`. If gh refuses, stop and report the refusal: the REST merge endpoint silently uses the admin bypass (PR #16).
 
 ## Coding
 
