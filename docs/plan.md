@@ -51,8 +51,8 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
    - **build** (Claude Sonnet, `SHINFACTORY_ROLE=build`): shinstack feature / bug-fix / refactoring
      playbook. Branch from freshly fetched origin default using the repo's branch convention (#227);
      delete a stale remote branch from an earlier closed PR (#186). Commits only.
-   - **`sf-gate-evidence`** (script, not an agent): runs `Before a PR:` from the MAIN checkout's CLAUDE.md;
-     bug work needs a test-only commit before the fix (shell tests and bats count). Then pushes the
+   - **`sf-gate-evidence`** (script, not an agent): pushes the branch so lefthook's pre-push hook runs gantry's checks
+     (no CLAUDE.md parsing; Shin 2026-11-15); bug work needs a test-only commit before the fix (shell tests and bats count). Then pushes the
      branch and opens or reuses the draft PR by branch (idempotent; `Closes #N`, opening-a-pr body with
      `## Scope`). Fail -> one retry with the exact reason; same rejection twice -> stop.
    - **review** (Codex, cross-model): tier depth (low/medium `/code-review`; high blast-radius +
@@ -135,3 +135,9 @@ steer box, brain/meditate, reused foreman session.
 - Build order: hand spike first, shinstack contract before stations, cut over shinstack first.
 - Not applied: "cut plan/debrief/triage/sensitive/config for v1". Shin asked for the full build, so
   they are sequenced last (step 5) instead.
+
+## Where each check lives (Shin, 2026-11-15)
+Check definitions live once, in gantry. Each repo holds only pointers: `lefthook.yml` (pulls gantry's hooks) and a
+thin `ci.yml` (calls gantry's workflow). The repo's own `package.json` / scripts define what "test" means. The factory
+adds one check only it can do (bug has a test commit first). Agents iterate on local hooks for free; CI runs once when
+the PR leaves draft (gantry#125).
