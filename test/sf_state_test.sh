@@ -547,7 +547,7 @@ test_ready_label_event_without_a_time_is_an_error() {
   world
   issues "[$(ready_issue_json 7)]"
   timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"}},$(comment "$attempt" 2026-10-01T00:00:00Z)]"
-  fails_with "sf-state: timeline of #7 has a ready label event with no UTC time"
+  fails_with "sf-state: timeline of #7 has a label event with no UTC time"
 }
 
 test_run_list_repeating_its_cursor_is_an_error() {

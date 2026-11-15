@@ -58,7 +58,8 @@ jq -e 'type == "array"' "$tmp/issues.json" > /dev/null 2>&1 || die "open issues 
 
 gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName > "$tmp/prs.json" \
   || die "open PRs not listed (gh pr list failed)"
-jq -e 'type == "array"' "$tmp/prs.json" > /dev/null 2>&1 || die "open PRs not listed: gh pr list printed no JSON array"
+jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.headRefName | type == "string"))' "$tmp/prs.json" > /dev/null 2>&1 \
+  || die "open PRs not listed: gh pr list printed no array of PRs with number and headRefName"
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
@@ -69,6 +70,7 @@ snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
 factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/runs.jsonl"
 cursor=
+seen_cursors=' '
 while :; do
   if [ -n "$cursor" ]; then
     orca orchestration run-list --json --full --limit 100 --cursor "$cursor" > "$tmp/page" \
@@ -87,11 +89,15 @@ while :; do
     orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
     jq -c -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
-      'select(.ok == true and (.result.tasks | type == "array")) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
+      'select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
       "$tmp/tasks" >> "$tmp/runs.jsonl" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
   done < "$tmp/factory-runs.tsv"
   cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')
   [ -n "$cursor" ] || break
+  case "$seen_cursors" in
+    *" $cursor "*) die "Orca Runs not listed: run-list repeated cursor [$cursor]" ;;
+  esac
+  seen_cursors="$seen_cursors$cursor "
 done
 
 # Timelines: every ready issue, plus every open issue that is neither ready nor parked
@@ -118,6 +124,8 @@ while read -r n kind; do
     jq -e 'any(.events[]; .event == "labeled" and .label.name == "ready")' "$tmp/timeline.json" > /dev/null \
       || die "timeline of #$n has no ready label event"
   fi
+  jq -e '[.events[] | select(.event == "labeled") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
+    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a label event with no UTC time"
   cat "$tmp/timeline.json" >> "$tmp/timelines.jsonl"
 done < "$tmp/timeline-issues"
 
@@ -138,8 +146,11 @@ def ready: has_label("ready") and (has_label("needs-shin") or has_label("icebox"
 def trusted: (.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a);
 def markers: [(.body // "") | scan("<!-- factory:(\\{.*?\\}) -->") | .[0] | (try fromjson catch empty)];
 # A hold reset must be UTC ISO-8601 (2026-11-15T10:00:00Z); a hold without one is ignored.
+# UTC ISO-8601 only (2026-11-15T10:00:00Z, fractions allowed); anything else is an error.
 # Fractional seconds are dropped first: fromdateiso8601 rejects them.
-def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+def epoch:
+  if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$")
+  then sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 else error("not a UTC ISO-8601 time") end;
 def reset_epoch: try (.reset | epoch) catch null;
 
 # #M refs on a `Depends on` line (heading, bold or plain), and on the list lines right after it
@@ -155,20 +166,20 @@ def deps:
 
 # dead: a failed task, or no tasks 10 minutes after creation (sf-act died between run-create and
 # task-create). A younger Run with no tasks is live: sf-act is still building its DAG.
-# done: every task completed. A created_at that does not parse is an error, not a guess.
+# done: every task completed. The created_at of every Run must parse: an error, not a guess.
 def created_epoch:
   . as $r | try (.created_at | epoch)
   catch error("Run \($r.id) created_at [\($r.created_at)] is not a UTC ISO-8601 time");
 def run_state:
   if (.tasks | length) == 0 then
-    (if (created_epoch + 600) > now then "live" else "dead" end)
+    (if (.created + 600) > now then "live" else "dead" end)
   elif any(.tasks[]; .status == "failed") then "dead"
   elif all(.tasks[]; .status == "completed") then "done"
   else "live" end;
 
 ($repo | lc) as $repo_lc
 | ($repo | split("/") | .[1]) as $name
-| ($runs | map(. + {state: run_state})) as $runs
+| ($runs | map(. + {created: created_epoch} | . + {state: run_state})) as $runs
 | ($issues[0] | map(.number)) as $open
 | ($timelines | map({key: (.n | tostring), value: .events}) | from_entries) as $tl
 | ([$runs[] | select(.state == "live")] | length) as $host_live
@@ -180,6 +191,7 @@ def run_state:
     | ($i | ready) as $is_ready
     | ($tl[$i.number | tostring] // []) as $events
     | ([$events[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
+    | (if $since == "" then -1 else ($since | epoch) end) as $since_e
     | [$events[] | select(.event == "commented" and .created_at > $since and trusted) | markers[]
         | select(.kind != "hold" or reset_epoch != null)] as $marks
     # A hold counts only if no restart marker came after it: a restart consumes the hold.
@@ -195,17 +207,18 @@ def run_state:
         deps: [$i | deps[] | select(. as $d | $open | index($d))],
         since: $since,
         # The newest live Run for the issue, else its newest Run. A live Run always wins, even
-        # an older one, so a live Run is never doubled. A non-live Run from before the last
-        # ready label is history.
+        # an older one, so a live Run is never doubled. On a ready issue, a non-live Run from
+        # before the last ready label is history. A non-ready issue has no such cut-off: its
+        # newest Run stays current until needs-shin follows it.
         run: ([$runs[] | select((.objective | lc) == "factory \($repo_lc)#\($i.number)")]
-              | sort_by(.created_at) as $rs
+              | sort_by(.created) as $rs
               | ([$rs[] | select(.state == "live")] | last)
-                // ($rs | last | if . != null and .created_at <= $since then null else . end)),
+                // ($rs | last | if . != null and $is_ready and .created <= $since_e then null else . end)),
         # A `needs-shin` label after a Run was created means its stop already happened.
-        stopped_at: ([$events[] | select(.event == "labeled" and .label.name == "needs-shin") | .created_at] | max // "")
+        stopped_at: ([$events[] | select(.event == "labeled" and .label.name == "needs-shin") | .created_at | epoch] | max // -1)
       }
     # A non-ready issue only owes a stop: a dead Run not yet followed by needs-shin.
-    | select(.ready or (.run != null and .run.state == "dead" and .stopped_at < .run.created_at))
+    | select(.ready or (.run != null and .run.state == "dead" and .stopped_at < .run.created))
   ] as $cands
 
 | (if any($cands[]; .held) then 0
