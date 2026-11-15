@@ -16,7 +16,7 @@ fi
 list=$(mktemp "${TMPDIR:-/tmp}/factory-check.XXXXXX")
 files=$(mktemp "${TMPDIR:-/tmp}/factory-check.XXXXXX")
 trap 'rm -f "$list" "$files"' EXIT
-find bin scripts test -type f > "$files"
+find bin lib scripts test -type f > "$files"
 sort "$files" | while IFS= read -r f; do
   case "$f" in
     *.sh) echo "$f" ;;

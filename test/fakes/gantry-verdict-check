@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake gantry-verdict-check for tests: replays fixtures and logs every call (see fake-cli).
+exec sh "$(dirname "$0")/fake-cli" gantry-verdict-check "$@"
