@@ -31,3 +31,31 @@ jobs:
     #   e2e: true
     #   node: false   # if this repo's own workflow runs its tests
     #   codegen-command: pnpm prisma generate   # fail when committed generated files are stale
+
+  # Repo-only check: gantry's node job is off (node: false), so this repo runs
+  # its own shellcheck + tests. Three OSes because the scripts must stay POSIX sh.
+  check:
+    if: ${{ github.event.action != 'edited' || github.event.changes.base }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then shellcheck --version | head -2; exit 0; fi
+          case "$RUNNER_OS" in
+            macOS) brew install shellcheck ;;
+            Windows) choco install shellcheck -y --no-progress ;;
+            *) sudo apt-get update && sudo apt-get install -y shellcheck ;;
+          esac
+      - name: scripts/check
+        run: sh scripts/check
