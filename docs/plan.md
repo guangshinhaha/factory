@@ -39,7 +39,8 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
    `sf-state` rules:
    - list open issues once and filter with jq; never the GitHub search API (26h block, shinfactory#175);
    - join issue -> Runs with `orca reference find`; join issue -> PR by branch, not by memory;
-   - a dead Run with no `needs-shin` and no PR progress = **owes a stop**, never startable (unsent-stops lesson);
+   - a dead Run with a hold marker past its reset time = restart that task (not an attempt);
+   - a dead Run with no hold marker and no `needs-shin` = **owes a stop**, never startable (unsent-stops lesson);
    - attempts = attempt markers since the last `ready` label event (timeline API), so re-readying resets the count;
    - at most `concurrency` live Runs.
 3. **intake.** No observable Done when -> stop. An undeclared `Depends on` -> hold, not fail (#243).
