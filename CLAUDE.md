@@ -3,7 +3,7 @@
 Orca-native, daemon-less software factory. Turns `ready` GitHub issues into reviewed, merged PRs.
 GitHub holds the backlog and state, Orca runs the workers, and this repo is a Claude Code plugin
 (skills + POSIX gate scripts) that holds the policy. Replaces guangshinhaha/shinfactory (Go loop).
-Plan: docs/plan.md.
+Plan: tracking issue #11 (no plan file; plans live in GitHub issues).
 
 ## Commands
 
@@ -29,6 +29,7 @@ A task is done only when the pre-push checks pass. Never use `--no-verify`.
 
 - Cross-platform (macOS/Windows/Linux): POSIX sh only, no bash 4+ features.
 - State lives only in GitHub and Orca. Never add a local state file.
+- Plans and task tracking live in GitHub issues. Never add a plan or TODO .md file.
 - Tests never call real `gh` or `orca`; put fakes on PATH.
 - Error messages describe the failure state ("run not found"), not the expectation.
 - No backward compatibility with shinfactory's files or config.
@@ -46,6 +47,6 @@ shinstack-mode: auto
 
 ## Knowledge
 
-- Plan: docs/plan.md
+- Plan: issue #11
 - Decisions: docs/decisions/
 - Solved problems and gotchas: docs/solutions/
