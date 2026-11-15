@@ -154,6 +154,15 @@ test_merged_fork_pr_is_not_reported_merged() {
   assert_contains "$(last_line)" "STOPPED: PR #9 is from a fork"
 }
 
+test_fork_flag_on_a_later_read_still_stops() {
+  world auto
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_json MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123 | jq -c '.isCrossRepository = true' | fixture_seq 2 gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_contains "$(last_line)" "STOPPED: PR #9 is from a fork"
+}
+
 test_pr_with_an_unreadable_cross_repository_flag_is_retried() {
   world auto
   pr_json OPEN false MERGEABLE CLEAN | jq -c 'del(.isCrossRepository)' | fixture gh pr view 9 -R "$REPO" --json "$PR_FIELDS"
