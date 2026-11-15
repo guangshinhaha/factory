@@ -63,6 +63,8 @@ for file in "$@"; do
       HOME=$tmp/work/home
       mkdir "$HOME"
       unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+      # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
+      unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
       export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
       # shellcheck source=test/lib.sh
       . "$root/test/lib.sh"
