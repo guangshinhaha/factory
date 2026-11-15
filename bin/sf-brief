@@ -1,0 +1,136 @@
+#!/bin/sh
+# sf-brief: print the brief for one station's Orca worker, from skills/brief/template.md, so every
+# worker of a station gets the same brief. Line 1 is `factory-role: <station>`.
+# Usage: sf-brief <station> --repo owner/repo --issue N [--branch B] [--pr N] [--tier T]
+#                 [--work-type W] [--round N]
+#   station    intake | build | review | verify
+#   --tier     none | low | medium | high (intake's decision)
+#   --work-type feature | bug-fix | refactoring (intake's decision; names the build playbook)
+#   --round    1 or 2: build and review's rework round (default 1)
+# Needs: intake --repo --issue; build also --branch --tier --work-type (and --pr in round 2);
+# review and verify also --branch --pr --tier.
+#
+# Skills and playbooks are named by absolute path, so any agent can read them (Codex can't load
+# Claude Code skills). shinstack is SHINSTACK_ROOT, else shinstack@shinstack's installPath in
+# ~/.claude/plugins/installed_plugins.json.
+#
+# Exit 0: brief on stdout. 1: shinstack or a file the brief names not found. 2: bad arguments.
+set -u
+
+me=sf-brief
+root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/factory.sh
+. "$root/lib/factory.sh"
+
+[ $# -ge 1 ] || usage_error "usage: sf-brief <intake|build|review|verify> --repo owner/repo --issue N [options]"
+station=$1
+shift
+case "$station" in
+  intake | build | review | verify) ;;
+  *) usage_error "station [$station] is not intake, build, review or verify" ;;
+esac
+
+repo='' issue='' branch='' pr='' tier='' work_type='' round=1
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || usage_error "$1 needs a value"
+  case "$1" in
+    --repo) repo=$2 ;;
+    --issue) issue=$2 ;;
+    --branch) branch=$2 ;;
+    --pr) pr=$2 ;;
+    --tier) tier=$2 ;;
+    --work-type) work_type=$2 ;;
+    --round) round=$2 ;;
+    *) usage_error "unknown argument: $1" ;;
+  esac
+  shift 2
+done
+
+# Every value is checked against a narrow pattern, so nothing in the brief comes from free text.
+printf '%s\n' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || usage_error "--repo [$repo] is not owner/repo"
+is_number "$issue" || usage_error "--issue [$issue] is not a number"
+[ -z "$pr" ] || is_number "$pr" || usage_error "--pr [$pr] is not a number"
+[ -z "$branch" ] || printf '%s\n' "$branch" | grep -Eq '^[A-Za-z0-9_.][A-Za-z0-9_./-]*$' \
+  || usage_error "--branch [$branch] is not a plain branch name"
+case "$tier" in '' | none | low | medium | high) ;; *) usage_error "--tier [$tier] is not none, low, medium or high" ;; esac
+case "$work_type" in '' | feature | bug-fix | refactoring) ;; *) usage_error "--work-type [$work_type] is not feature, bug-fix or refactoring" ;; esac
+case "$round" in 1 | 2) ;; *) usage_error "--round [$round] is not 1 or 2" ;; esac
+
+# need <flag> <value>: the station needs this flag.
+need() {
+  [ -n "$2" ] || usage_error "$station needs $1"
+}
+case "$station" in
+  build)
+    need --branch "$branch"
+    need --tier "$tier"
+    need --work-type "$work_type"
+    [ "$round" = 1 ] || need "--pr in round $round" "$pr"
+    ;;
+  review | verify)
+    need --branch "$branch"
+    need --pr "$pr"
+    need --tier "$tier"
+    ;;
+esac
+# Only build and review have rounds; only build has a work type.
+case "$station" in build | review) ;; *) round='' ;; esac
+[ "$station" = build ] || work_type=''
+
+shinstack=${SHINSTACK_ROOT:-}
+if [ -z "$shinstack" ]; then
+  need_jq
+  plugins=$HOME/.claude/plugins/installed_plugins.json
+  shinstack=$(jq -r '.plugins["shinstack@shinstack"][0].installPath // empty' "$plugins" 2> /dev/null) || shinstack=
+  [ -n "$shinstack" ] || die "shinstack not found: no shinstack@shinstack installPath in $plugins and SHINSTACK_ROOT is unset"
+fi
+
+case "$station" in
+  intake) playbook=feature.md ;;
+  build) playbook=$work_type.md ;;
+  review) playbook=opening-a-pr.md ;;
+  verify) playbook=ship.md ;;
+esac
+playbook=$shinstack/playbooks/$playbook
+skill=$root/skills/$station/SKILL.md
+template=$root/skills/brief/template.md
+for f in "$template" "$skill"; do
+  [ -f "$f" ] || die "file not found: $f"
+done
+[ -f "$playbook" ] || die "playbook not found: $playbook (shinstack at $shinstack predates the playbooks/ layout?)"
+
+case "$station" in
+  intake) proof="Your result line carries the decision: \`go\` with tier, work type and whether a plan comes first, or \`stop\` or \`hold\` with the reason. You change nothing: no commits, no GitHub writes." ;;
+  build) proof="Commits on $branch that meet the issue's Done when and pass the repo's checks, with a clean working tree. Your result line names the head SHA." ;;
+  review) proof="One comment on PR #$pr with a \`Covered:\` line and a \`Findings:\` list, for the PR's head SHA. Your result line has its URL." ;;
+  verify) proof="One comment on PR #$pr holding the verdict JSON for the PR's head SHA, in the format \`gantry-verdict-check\` reads. Your result line has its URL and the verdict." ;;
+esac
+case "$station" in
+  review | verify) comment_rule="Post exactly one comment on PR #$pr, as your skill says. Nothing else writes to GitHub." ;;
+  *) comment_rule="Write nothing to GitHub." ;;
+esac
+pr_url=
+[ -z "$pr" ] || pr_url="https://github.com/$repo/pull/$pr (PR #$pr)"
+
+# Fill {{key}} from B_key. A line whose placeholder is empty is dropped (a fact that doesn't apply).
+B_station=$station B_repo=$repo B_issue=$issue B_issue_url=https://github.com/$repo/issues/$issue \
+  B_branch=$branch B_pr_url=$pr_url B_tier=$tier B_work_type=$work_type B_round=$round \
+  B_skill=$skill B_playbook=$playbook B_shinstack=$shinstack B_proof=$proof B_comment_rule=$comment_rule \
+  awk '
+  {
+    out = ""; line = $0; drop = 0
+    while ((i = index(line, "{{")) > 0) {
+      rest = substr(line, i + 2)
+      j = index(rest, "}}")
+      if (j == 0) break
+      key = substr(rest, 1, j - 1)
+      if (!(("B_" key) in ENVIRON)) { print "sf-brief: template has unknown placeholder {{" key "}}" > "/dev/stderr"; bad = 1; exit 1 }
+      val = ENVIRON["B_" key]
+      if (val == "") drop = 1
+      out = out substr(line, 1, i - 1) val
+      line = substr(rest, j + 2)
+    }
+    if (!drop) print out line
+  }
+  END { if (bad) exit 1 }
+' "$template" || die "template not rendered: $template"
