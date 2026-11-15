@@ -33,9 +33,9 @@ comment on the PR or issue (`<!-- factory:{"kind":"attempt",...} -->`), never a 
 1. **Automation.** One per repo, cron every 5 min, provider claude, **fresh session per fire**,
    prompt `/factory:foreman`. `--precheck sf-precheck` exits non-zero when there is nothing to do,
    so most fires start no agent.
-2. **foreman.** Takes a `mkdir` lock (two overlapping fires: the second exits). Runs `sf-state`, which
+2. **`sf-tick` (foreman as a script, Shin 2026-11-15).** Runs as the automation's precheck, so no agent starts and scheduling costs no tokens. Takes a `mkdir` lock (two overlapping fires: the second exits). Runs `sf-state`, which
    prints the *action list* as JSON: `start #N`, `advance run R`, `stop #N reason`, `ship PR`, `hold #N`.
-   The foreman (Haiku) executes the list and adds judgment only where an action asks for it.
+   `sf-tick` carries out the list itself and exits non-zero. Judgment lives only in the stations.
    `sf-state` rules:
    - list open issues once and filter with jq; never the GitHub search API (26h block, shinfactory#175);
    - join issue -> Runs with `orca reference find`; join issue -> PR by branch, not by memory;
