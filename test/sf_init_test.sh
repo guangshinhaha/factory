@@ -25,7 +25,7 @@ world() {
   printf '# app\n\n## shinstack\nshinstack-mode: auto\n\n## Other\nkeep me\n' > "$TEST_TMP/seed/CLAUDE.md"
   seed_commit
   git clone -q "$ORIGIN" "$WS"
-  WS=$(cd "$WS" && pwd) # as sf-init sees it ($TMPDIR may end in /)
+  WS=$(git -C "$WS" rev-parse --show-toplevel) # as sf-init sees it (C:/... on Windows)
 
   labels ""
   for l in ready needs-shin icebox risk:high; do label_create "$l" < /dev/null; done
@@ -209,7 +209,7 @@ test_workspace_of_another_repo_exits_2_without_writes() {
 test_default_workspace_is_the_main_checkout() {
   world
   git -C "$WS" worktree add -q --detach "$TEST_TMP/side"
-  main=$(git -C "$WS" worktree list --porcelain | sed -n '1s/^worktree //p')
+  main=$WS # the side worktree's main checkout, in git's form
   echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
     --prompt /factory:foreman --precheck sf-tick --workspace "path:$main" --json
   (cd "$TEST_TMP/side" && sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO") > /dev/null
@@ -269,9 +269,12 @@ test_automation_of_a_same_named_repo_does_not_count() {
 
 test_symlinked_claude_md_exits_1_naming_it() {
   world
-  mv "$TEST_TMP/seed/CLAUDE.md" "$TEST_TMP/seed/AGENTS.md"
-  ln -s AGENTS.md "$TEST_TMP/seed/CLAUDE.md"
-  seed_commit
+  git -C "$TEST_TMP/seed" mv CLAUDE.md AGENTS.md
+  # A symlink built in the index: Git Bash's ln -s copies the file instead.
+  link=$(printf 'AGENTS.md' | git -C "$TEST_TMP/seed" hash-object -w --stdin)
+  git -C "$TEST_TMP/seed" update-index --add --cacheinfo "120000,$link,CLAUDE.md"
+  git -C "$TEST_TMP/seed" commit -q -m link
+  git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
   status=0
   sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "exit status"

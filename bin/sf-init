@@ -51,7 +51,8 @@ if [ -z "$ws" ]; then
   [ -n "$ws" ] || usage_error "no git repo at the current directory, and no --workspace"
 fi
 [ -d "$ws" ] || usage_error "workspace [$ws] is not a directory"
-ws=$(cd "$ws" && pwd)
+# git's own form of the path (C:/... on Windows), which native tools like orca read too.
+ws=$(git -C "$ws" rev-parse --show-toplevel 2> /dev/null) || usage_error "workspace [$ws] is not a git checkout"
 # Both origin URLs: git push uses the push URL when one is set. GitHub names ignore case.
 lc() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'; }
 for flag in '' --push; do
@@ -100,11 +101,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+# Blobs by id, never `git show <ref>:<path>`: Git Bash rewrites that argument as a path list.
+tree=$(git -C "$ws" ls-tree "origin/$default" -- CLAUDE.md .github/gantry-risky-paths) \
+  || die "files on origin/$default not listed (git ls-tree failed)"
 # A symlink would be read as its target's path and written through to another file.
-links=$(git -C "$ws" ls-tree "origin/$default" -- CLAUDE.md .github/gantry-risky-paths | awk '$1 == "120000" { printf "%s ", $4 }')
+links=$(printf '%s\n' "$tree" | awk '$1 == "120000" { printf "%s ", $4 }')
 [ -z "$links" ] || die "${links% } on $default is a symlink; add the factory lines to the file it points at"
-git -C "$ws" show "origin/$default:.github/gantry-risky-paths" > "$tmp/risky" 2> /dev/null || : > "$tmp/risky"
-git -C "$ws" show "origin/$default:CLAUDE.md" > "$tmp/claude" 2> /dev/null || : > "$tmp/claude"
+# read_blob <path> <out>: the file on origin/<default>, or empty when it has none.
+read_blob() {
+  blob=$(printf '%s\n' "$tree" | awk -v p="$1" '$4 == p { print $3 }')
+  if [ -z "$blob" ]; then
+    : > "$2"
+  else
+    git -C "$ws" cat-file blob "$blob" > "$2" || die "$1 on origin/$default not read (git cat-file failed)"
+  fi
+}
+read_blob .github/gantry-risky-paths "$tmp/risky"
+read_blob CLAUDE.md "$tmp/claude"
 for f in "$tmp/risky" "$tmp/claude"; do
   [ ! -s "$f" ] || [ -z "$(tail -c 1 "$f")" ] || echo >> "$f"
 done
