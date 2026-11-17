@@ -217,7 +217,11 @@ hold_task() {
   sf-hold --repo "$repo" "$issue" "$3" "$4" >&2
 }
 in_an_hour() { jq -nr 'now + 3600 | floor | todate'; }
-provider_of() { [ "$1" = review ] && echo codex || echo claude; }
+# The provider of the station's agent; the table's when the override can't be read.
+provider_of() {
+  pm=$(model_for "$1" 2> /dev/null) || pm=$(default_model "$1")
+  echo "${pm%% *}"
+}
 # limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
 limit_seen() {
   ld=$(o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty')
@@ -271,18 +275,82 @@ brief_for() {
   sf-brief "$@"
 }
 
+# default_model <station>: "agent model" from the launch table (#7).
+default_model() {
+  case "$1" in
+    intake) echo "claude sonnet" ;;
+    plan) echo "claude opus" ;;
+    build) echo "claude sonnet" ;;
+    review) echo "codex codex-auto-review" ;;
+    verify) echo "claude opus" ;;
+    debrief) echo "claude haiku" ;;
+  esac
+}
+
+# model_for <station>: (exit 2: origin or CLAUDE.md not readable, to retry; exit 1: a bad line) print "agent model": the table's, unless CLAUDE.md on origin's default
+# branch has `factory-model.<station>: <agent>/<model>` (#37). Any malformed or duplicate
+# factory-model line, unknown station or unknown agent fails with the line named, whatever
+# station is asked for. `factory-sensitive: true` keeps review on Claude over any review line.
+model_for() {
+  mf=$(default_model "$1")
+  git -C "$main" fetch -q origin 2> "$tmp/err" || { echo "origin not fetched: $(first "$tmp/err")"; return 2; }
+  mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 2; }
+  # LC_ALL=C: bytes, so an odd byte in CLAUDE.md can't make tr or grep drop the file.
+  git -C "$main" show "$mdef:CLAUDE.md" > "$tmp/claude.raw" 2> /dev/null || : > "$tmp/claude.raw"
+  LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 2; }
+  # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
+  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
+  LC_ALL=C grep -a '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  if [ -s "$tmp/bad" ]; then printf '%s\n' "CLAUDE.md line [$(LC_ALL=C sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
+  seen=' '
+  while IFS= read -r ml; do
+    ml=$(printf '%s' "$ml" | LC_ALL=C sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ms=''
+    if printf '%s\n' "$ml" | LC_ALL=C grep -aEq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex)/[A-Za-z0-9._-]+$'; then
+      ms=${ml#factory-model.}
+      ms=${ms%%:*}
+    fi
+    case "$ms" in
+      intake | plan | build | review | verify | debrief) ;;
+      *) printf '%s\n' "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex>/<model>"; return 1 ;;
+    esac
+    case "$seen" in *" $ms "*) printf '%s\n' "CLAUDE.md line [$ml] repeats factory-model.$ms"; return 1 ;; esac
+    seen="$seen$ms "
+    if [ "$ms" = "$1" ]; then
+      v=${ml#*:}
+      v=$(printf '%s' "$v" | sed 's/^[[:space:]]*//')
+      mf="${v%%/*} ${v#*/}"
+    fi
+  done < "$tmp/models"
+  if [ "$1" = review ] && LC_ALL=C grep -aEq '^[[:space:]]*factory-sensitive:[[:space:]]*true[[:space:]]*$' "$tmp/claude.md"; then
+    mf="claude opus"
+  fi
+  echo "$mf"
+}
+
 # start_worker <run> <task>: launch the task's worker per the launch table (#7).
 start_worker() {
   t=$2
   title=$(title_of "$t")
   st=$(station_of "$title")
+  mrc=0
+  am=$(model_for "$st") || mrc=$?
+  if [ $mrc -eq 2 ]; then
+    # Origin or CLAUDE.md not readable: not the repo's mistake, so the next fire retries.
+    log "#$issue: $title worker not started, next fire retries: $am"
+    return 1
+  elif [ $mrc -ne 0 ]; then
+    bind "$1" && give_up "$t" "$st" "$am"
+    return 1
+  fi
+  agent=${am% *} model=${am#* }
   case "$st" in
-    intake) agent=claude model=sonnet wt=$main ;;
-    plan) agent=claude model=opus wt=$main ;;
-    build) agent=claude model=sonnet wt=$(branch_wt "$(branch)") ;;
-    review) agent=codex model=codex-auto-review wt=$(branch_wt "$(branch)") ;;
-    verify) agent=claude model=opus wt=$(branch_wt "$(branch)") ;;
-    debrief) agent=claude model=haiku wt=$(prep "$(debrief_branch)") || return 1 ;;
+    intake) wt=$main ;;
+    plan) wt=$main ;;
+    build) wt=$(branch_wt "$(branch)") ;;
+    review) wt=$(branch_wt "$(branch)") ;;
+    verify) wt=$(branch_wt "$(branch)") ;;
+    debrief) wt=$(prep "$(debrief_branch)") || return 1 ;;
   esac
   [ -n "$wt" ] || { give_up "$t" "$st" "$title worker not started: no worktree on branch $(branch)"; return 1; }
   bind "$1" || return 1
@@ -296,10 +364,10 @@ start_worker() {
   fi
   why=$(cat "$tmp/started" "$tmp/err" | tr '\n' ' ' | clip)
   if printf '%s\n' "$why" | grep -Eiq "$LIMIT_RE"; then
-    hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$agent usage limit: $why"
+    hold_task "$t" "$st" "$agent" "$(in_an_hour)" "$agent usage limit: $why"
     return
   fi
-  if [ "$st" = review ]; then
+  if [ "$st" = review ] && [ "$agent" = codex ]; then
     # No Codex access is a skip with a PR comment; anything else a usage limit didn't explain stops.
     if printf '%s\n' "$why" | grep -Eiq 'not installed|codex[^ ]* not found|command not found|not signed in|not logged in|log ?in required|unauthenticated|unauthorized|unknown agent'; then
       pr=$(open_pr "$(branch)")

@@ -598,3 +598,110 @@ test_an_issue_closed_with_a_step_ready_abandons_the_run() {
   assert_eq 0 "$(count_calls gantry-gate-evidence)" "gate runs"
   assert_eq '[]' "$(sh "$FACTORY_ROOT/bin/sf-state" "$REPO" | jq -c .)" "actions after the abandon"
 }
+
+# claude_md <text>: origin's default branch gets this CLAUDE.md.
+claude_md() {
+  printf '%s\n' "$1" > CLAUDE.md
+  git add CLAUDE.md && git_q commit -m claude-md && git_q push origin main
+}
+
+test_a_factory_model_line_overrides_the_station_agent_and_model() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\nfactory-model.intake: codex/codex-auto-review\nfactory-model.build: claude/opus')"
+  acts
+  assert_eq codex/codex-auto-review "$(agent_of intake)" "intake agent"
+  finish intake "$GO"
+  acts
+  assert_eq claude/opus "$(agent_of build)" "build agent"
+}
+
+test_no_factory_model_line_keeps_the_default() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\nfactory-model.build: claude/opus')"
+  acts
+  assert_eq claude/sonnet "$(agent_of intake)" "intake agent"
+}
+
+# bad_model_line <line>: the line stops the issue naming it, and no worker starts.
+bad_model_line() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\n%s' "$1")"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[$1]"
+  assert_eq failed "$(status_of intake)" "intake"
+  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+}
+test_a_factory_model_line_without_a_slash_stops() { bad_model_line 'factory-model.build: opus'; }
+test_a_factory_model_line_for_an_unknown_station_stops() { bad_model_line 'factory-model.deploy: claude/opus'; }
+test_a_factory_model_line_for_an_unknown_agent_stops() { bad_model_line 'factory-model.build: gemini/pro'; }
+test_a_factory_model_line_with_trailing_text_stops() { bad_model_line 'factory-model.build: claude/opus extra'; }
+
+test_factory_sensitive_forces_review_onto_claude_over_any_review_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true\nfactory-model.review: codex/codex-auto-review')"
+  to_review
+  assert_eq claude/opus "$(agent_of review)" "review agent"
+}
+
+test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run() {
+  world
+  claude_md "$(printf 'factory-sensitive: true')"
+  to_build
+  echo "PASS" | fixture gantry-gate-evidence --force-with-lease
+  open_pr_seq app-7 '' 12
+  fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
+  orca_fails worker-start "claude: not logged in"
+  finish build "$BUILT"
+  act
+  assert_eq ready "$(status_of review)" "review"
+  assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
+}
+
+test_a_hold_names_the_provider_the_worker_was_launched_on() {
+  world
+  claude_md "$(printf 'factory-model.intake: codex/gpt')"
+  orca_fails worker-start "codex usage limit reached"
+  act
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " codex "
+}
+
+test_a_malformed_factory_sensitive_line_stops_naming_the_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true # PDPA')"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[factory-sensitive: true # PDPA]"
+  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+}
+
+test_an_override_pushed_to_origin_since_the_last_fetch_applies() {
+  world
+  git_q clone "$TEST_TMP/origin.git" "$TEST_TMP/other"
+  printf 'factory-model.intake: claude/opus\n' > "$TEST_TMP/other/CLAUDE.md"
+  git -C "$TEST_TMP/other" add CLAUDE.md
+  git -C "$TEST_TMP/other" commit -q -m override
+  git -C "$TEST_TMP/other" push -q origin HEAD:main
+  acts
+  assert_eq claude/opus "$(agent_of intake)" "intake agent"
+}
+
+test_a_factory_model_line_missing_its_dot_stops() { bad_model_line 'factory-model: build claude/opus'; }
+test_a_bulleted_factory_model_line_stops() { bad_model_line '- factory-model.intake: codex/codex-auto-review'; }
+test_a_factory_model_line_in_another_case_stops() { bad_model_line 'Factory-Model.build: claude/opus'; }
+test_a_stop_reason_keeps_a_backslash_in_the_line() { bad_model_line 'factory-model.build: claude/x\c y'; }
+
+test_an_invalid_utf8_byte_in_claude_md_keeps_the_overrides() {
+  world
+  printf 'caf\351\nfactory-model.intake: codex/codex-auto-review\n' > CLAUDE.md
+  git add CLAUDE.md && git_q commit -m latin1 && git_q push origin main
+  LC_ALL=en_US.UTF-8 acts
+  assert_eq codex/codex-auto-review "$(agent_of intake)" "intake agent"
+}
+
+test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
+  world
+  git -C "$TEST_TMP/app" remote set-url origin "$TEST_TMP/gone.git"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
+  assert_contains "$(cat "$TEST_TMP/err")" "next fire retries: origin not fetched"
+}
