@@ -700,3 +700,11 @@ test_closed_issue_live_run_advances_only_debrief_and_lessons() {
   tasks run_b '[{"id":"t1","status":"ready","title":"review"}]'
   assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
 }
+
+test_closed_issue_live_run_finishes_a_ready_ship() {
+  world
+  issues '[]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"verify"},{"id":"t2","status":"ready","title":"ship"}]'
+  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
+}

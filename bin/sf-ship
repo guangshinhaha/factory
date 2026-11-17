@@ -184,7 +184,8 @@ wait_mergeable() {
     : > "$tmp/checks.err"
     gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
     if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
-      if grep -q 'no required checks reported' "$tmp/checks.err"; then
+      # A repo with no CI at all says `no checks reported`: no required check gates it either.
+      if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
         echo '[]' > "$tmp/checks"
       else
         retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"

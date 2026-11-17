@@ -525,3 +525,16 @@ test_comment_without_a_findings_line_is_not_a_review() {
   assert_eq 1 "$status" "exit status"
   assert_contains "$(last_line)" "STOPPED: no review for PR #9" "last line"
 }
+
+# Seen in the e2e (#7): a repo with no CI has no checks at all; that must not retry forever.
+test_a_repo_with_no_checks_at_all_merges() {
+  world auto
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  fixture gh pr checks 9 -R "$REPO" --required --json name,bucket < /dev/null
+  fixture_exit 1 "no checks reported on the 'app-7' branch"
+  fixture gh pr merge 9 -R "$REPO" --squash --match-head-commit "$HEAD_SHA" < /dev/null
+  ship_status
+  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_eq "MERGED abc123" "$(last_line)" "result"
+}

@@ -153,7 +153,7 @@ round_of() { case " $1 " in *" r2 "*) echo 2 ;; *) echo 1 ;; esac; }
 # A worker station's success statuses (contract #7), plus sf-act's own completions.
 ok_status() {
   case "$1:$2" in
-    intake:go | plan:planned | build:built | review:clean | review:not-run | verify:PASS | verify:PASS+NOTES) return 0 ;;
+    intake:go | plan:planned | build:built | review:clean | verify:PASS | verify:PASS+NOTES) return 0 ;;
     debrief:debriefed | debrief:nothing) return 0 ;;
   esac
   return 1
@@ -324,11 +324,15 @@ need_result() {
   [ -n "$rj" ] || { echo "$2 result has no parseable factory-result line"; return 1; }
   [ "$(rget "$rj" .station)" = "$2" ] || { echo "$2 result names station [$(rget "$rj" .station)]"; return 1; }
   rs=$(rget "$rj" .status)
-  # `reworked` is sf-act's own completion (plain text); a worker report claiming it is refused.
-  if [ "$rs" = reworked ] && ! tfield "$1" result | jq -e '.body' > /dev/null 2>&1; then
-    printf '%s\n' "$rj"
-    return 0
-  fi
+  # `reworked` and `not-run` are sf-act's own completions (plain text); a worker report claiming
+  # either is refused.
+  case "$rs" in
+    reworked | not-run)
+      if tfield "$1" result | jq -e '.body' > /dev/null 2>&1; then echo "$2 worker reported sf-act's own status [$rs]"; return 1; fi
+      printf '%s\n' "$rj"
+      return 0
+      ;;
+  esac
   ok_status "$2" "$rs" || { echo "$2 completed with status [$rs]"; return 1; }
   printf '%s\n' "$rj"
 }
@@ -447,20 +451,7 @@ step_ship() {
   last=$(awk 'NF { l = $0 } END { print l }' "$tmp/ship")
   case $rc in
     0)
-      if [ -z "$(find_task debrief "$2")" ]; then
-        if brief_for debrief > "$tmp/brief" 2> "$tmp/err"; then
-          # The PR is merged and the issue closed: sf-state won't revisit this ship task, so a
-          # debrief that can't be queued is logged and skipped rather than stranding the Run.
-          if d=$(create "$1" debrief "[\"$2\"]" "$2" < "$tmp/brief"); then
-            echo "inline step: sf-act pushes debrief notes and files lessons" | create "$1" lessons "[\"$d\"]" "$d" > /dev/null \
-              || log "#$issue: lessons not queued after the merge"
-          else
-            log "#$issue: no debrief: not queued after the merge"
-          fi
-        else
-          log "#$issue: no debrief: $(first "$tmp/err")"
-        fi
-      fi
+      queue_debrief "$1" "$2"
       done_with "$2" "$last"
       ;;
     1) failed_with "$2" "factory-result: {\"station\":\"ship\",\"status\":\"stop\",\"reason\":$(js "${last#STOPPED: }")}" ;;
@@ -472,6 +463,33 @@ step_ship() {
       ;;
     *) log "#$issue: sf-ship: $last (next fire retries)" ;;
   esac
+}
+
+# queue_debrief <run> <ship task>: debrief + lessons after the merge. The issue is closed, so a
+# debrief that can't be queued is logged and skipped rather than stranding the Run.
+queue_debrief() {
+  [ -z "$(find_task debrief "$2")" ] || return 0
+  if ! brief_for debrief > "$tmp/brief" 2> "$tmp/err"; then log "#$issue: no debrief: $(first "$tmp/err")"; return 0; fi
+  if d=$(create "$1" debrief "[\"$2\"]" "$2" < "$tmp/brief"); then
+    echo "inline step: sf-act pushes debrief notes and files lessons" | create "$1" lessons "[\"$d\"]" "$d" > /dev/null \
+      || log "#$issue: lessons not queued after the merge"
+  else
+    log "#$issue: no debrief: not queued after the merge"
+  fi
+}
+
+# step_shipped <run> <ship task>: a ready ship task on a closed issue (sf-state's advance), left by a
+# fire that died after sf-ship merged, or an issue closed by hand. Completing it frees the Run.
+step_shipped() {
+  merged=$(gh pr list -R "$repo" --head "$(branch)" --state merged --json number,isCrossRepository \
+    -q '[.[] | select(.isCrossRepository | not)][0].number // empty' 2> "$tmp/err") \
+    || { log "merged PR on $(branch) not looked up: $(first "$tmp/err")"; return 1; }
+  if [ -z "$merged" ]; then
+    done_with "$2" "issue closed without a merged PR; no debrief"
+    return
+  fi
+  queue_debrief "$1" "$2"
+  done_with "$2" "merged (PR #$merged) by an earlier fire"
 }
 
 step_lessons() {
@@ -552,9 +570,10 @@ act_advance() {
       done
       start_worker "$run" "$t"
       ;;
-    route | post-plan | gate | lessons)
+    route | post-plan | gate | lessons | ship)
       bind "$run" || return 1
       case "$st" in
+        ship) step_shipped "$run" "$t" ;;
         route) step_route "$run" "$t" ;;
         post-plan) step_post_plan "$run" "$t" ;;
         gate) step_gate "$run" "$t" ;;

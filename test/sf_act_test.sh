@@ -480,7 +480,7 @@ test_a_worker_claiming_reworked_is_refused() {
   echo "PASS: pushed app-7" | fixture gantry-gate-evidence --force-with-lease
   finish build 'factory-result: {"station":"build","status":"reworked"}'
   act
-  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "build completed with status [reworked]"
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "build worker reported sf-act's own status [reworked]"
 }
 
 # The sf-stop stub leaves the ready label, so later passes stop the dead Run again; real sf-stop
@@ -520,4 +520,47 @@ test_a_merge_completes_ship_even_when_the_debrief_cannot_be_queued() {
   act
   assert_eq completed "$(status_of ship)" "ship"
   assert_contains "$(cat "$TEST_TMP/err")" "no debrief: not queued after the merge"
+}
+
+# Verifier finding (#7): only sf-act's Codex skip completes review as not-run.
+test_a_worker_claiming_not_run_never_starts_verify() {
+  world
+  to_review
+  finish review 'factory-result: {"station":"review","status":"not-run","head_sha":"abc","reason":"x"}'
+  act
+  assert_eq "" "$(dispatch_of verify)" "verify dispatch"
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "review worker reported sf-act's own status [not-run]"
+}
+
+# Verifier finding (#7): a fire that dies after the merge leaves ship ready on a closed issue; the
+# next fire completes it and runs the debrief, so the Run never holds a slot for good.
+test_a_ship_left_ready_after_the_merge_completes_on_the_next_fire() {
+  world
+  to_ship
+  echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  orca_fails task-update "orca: down"
+  act
+  assert_eq ready "$(status_of ship)" "ship after the failed fire"
+  orca_ok task-update
+  rm "$TEST_TMP/sf-ship.out"
+  issues '[]'
+  echo 12 | fixture gh pr list -R "$REPO" --head app-7 --state merged --json number,isCrossRepository -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
+  acts
+  assert_eq 1 "$(count_calls sf-ship)" "sf-ship calls"
+  assert_eq completed "$(status_of ship)" "ship"
+  assert_contains "$(sim '[.tasks[] | select(.title == "ship")][0].result')" "merged (PR #12) by an earlier fire"
+  assert_eq dispatched "$(status_of debrief)" "debrief"
+}
+
+test_a_ship_left_ready_on_an_issue_closed_without_a_merge_completes_without_a_debrief() {
+  world
+  to_ship
+  issues '[]'
+  printf '\n' | fixture gh pr list -R "$REPO" --head app-7 --state merged --json number,isCrossRepository -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
+  finish verify "$VERIFIED"
+  acts
+  assert_eq 0 "$(count_calls sf-ship)" "sf-ship calls"
+  assert_eq completed "$(status_of ship)" "ship"
+  assert_eq none "$(status_of debrief)" "debrief"
 }
