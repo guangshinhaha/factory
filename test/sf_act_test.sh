@@ -657,7 +657,7 @@ test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run
   assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
 }
 
-test_a_review_hold_names_the_provider_the_worker_was_launched_on() {
+test_a_hold_names_the_provider_the_worker_was_launched_on() {
   world
   claude_md "$(printf 'factory-model.intake: codex/gpt')"
   orca_fails worker-start "codex usage limit reached"
