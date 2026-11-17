@@ -5,7 +5,7 @@ See CLAUDE.md for the layout and the plan issue (#11).
 
 ## Config
 
-Set in the target repo's CLAUDE.md, on its default branch. `sf-init` adds the first three.
+Set in the target repo's CLAUDE.md, on its default branch. `sf-init` adds `factory-concurrency` and `factory-sensitive`.
 
 - `shinstack-mode: auto|supervised|manual`: how far the factory goes on its own (merge needs `auto`).
 - `factory-concurrency: N`: live Runs for this repo (default 2).
