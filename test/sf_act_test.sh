@@ -705,3 +705,151 @@ test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
   assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
   assert_contains "$(cat "$TEST_TMP/err")" "next fire retries: origin not fetched"
 }
+
+# ---- cleanup -------------------------------------------------------------------------------------
+
+# wt_path: the issue's build worktree, spelled as the sim reports it (Windows spells paths
+# C:/x or /c/x depending on which tool asks, so never recompute it).
+wt_path() { sim '.worktrees[] | select(.branch == "app-7") | .path' | tr -d '\r'; }
+# worker_terminal <handle> [path]: a live terminal in the worktree (default: the build worktree).
+worker_terminal() { sim_set '.terminals += [{handle: $h, worktree: "path:\($w)", title: "worker"}]' --arg h "$1" --arg w "${2:-$(wt_path)}"; }
+# A Run that shipped: every task completed, issue closed.
+run_done() { sim_set '.tasks |= map(.status = "completed")'; issues '[]'; }
+
+test_a_merged_runs_worktree_and_branch_are_removed_and_a_second_fire_does_nothing() {
+  world
+  to_build
+  w=$(wt_path)
+  run_done
+  acts
+  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  [ ! -d "$w" ] || fail "worktree still on disk"
+  if git -C "$TEST_TMP/app" show-ref --verify -q refs/heads/app-7; then fail "branch app-7 still exists"; fi
+  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls"
+  acts
+  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls after a second fire"
+}
+
+test_a_worktree_with_uncommitted_changes_is_never_removed_and_its_path_is_reported() {
+  world
+  to_build
+  w=$(wt_path)
+  run_done
+  echo scratch > "$w/notes.txt"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "$w has uncommitted changes" "stderr"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  [ -d "$w" ] || fail "dirty worktree removed"
+  rm "$w/notes.txt"
+  echo more >> "$w/CLAUDE.md"
+  act
+  assert_eq 1 "$act_status" "exit status with a modified tracked file"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls after a tracked edit"
+  git -C "$w" checkout -q CLAUDE.md
+  acts
+  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls once clean"
+}
+
+test_a_same_named_worktree_of_another_repo_is_never_removed() {
+  world
+  to_build
+  w=$(wt_path)
+  run_done
+  rm -rf "$w"
+  git clone -q "$TEST_TMP/app" "$w"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "not a worktree of this repo" "stderr"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  [ -d "$w" ] || fail "foreign worktree removed"
+}
+
+test_a_worktree_whose_state_cannot_be_read_is_never_removed() {
+  world
+  to_build
+  w=$(wt_path)
+  run_done
+  rm -rf "$w/.git"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+}
+
+test_a_stop_closes_the_runs_terminals_first_and_keeps_the_worktree() {
+  world
+  to_build
+  w=$(wt_path)
+  worker_terminal term_a
+  worker_terminal term_b
+  worker_terminal term_main "$TEST_TMP/app"
+  finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
+  acts
+  assert_called "orca terminal close --terminal term_a --json"
+  assert_called "orca terminal close --terminal term_b --json"
+  assert_not_called "orca terminal close --terminal term_main --json"
+  assert_eq term_main "$(sim '[.terminals[].handle] | join(",")')" "terminals left"
+  assert_called "sf-stop --repo acme/app 7 build: cannot build"
+  closed=$(grep -n '^orca terminal close' "$FAKE_LOG" | tail -n 1 | cut -d: -f1)
+  stopped=$(grep -n '^sf-stop' "$FAKE_LOG" | head -n 1 | cut -d: -f1)
+  [ "$closed" -lt "$stopped" ] || fail "sf-stop ran before the terminals were closed"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  [ -d "$w" ] || fail "stopped Run's worktree removed"
+}
+
+test_a_stop_whose_terminals_cannot_be_closed_is_not_recorded_so_the_next_fire_retries() {
+  world
+  to_build
+  worker_terminal term_a
+  finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
+  orca_fails close "orca: terminal busy"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
+  orca_ok close
+  acts
+  assert_called "sf-stop --repo acme/app 7 build: cannot build"
+  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
+}
+
+test_a_terminal_list_that_is_not_a_list_stops_the_stop_and_the_next_fire_retries() {
+  world
+  to_build
+  worker_terminal term_a
+  finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
+  for bad in 'not json at all' '{"ok":false,"error":{"code":"x"}}' '{"ok":true,"result":{}}'; do
+    printf '%s\n' "$bad" > "$ORCA_SIM/fail/list.out"
+    act
+    assert_eq 1 "$act_status" "sf-act exit status on [$bad]"
+    assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls on [$bad]"
+    assert_eq 1 "$(sim '.terminals | length')" "terminals left on [$bad]"
+  done
+  rm -f "$ORCA_SIM/fail/list.out"
+  acts
+  assert_called "sf-stop --repo acme/app 7 build: cannot build"
+  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
+}
+
+test_an_abandoned_runs_terminals_are_closed_so_its_worktree_can_be_cleaned_up() {
+  world
+  to_build
+  w=$(wt_path)
+  worker_terminal term_a
+  issues '[]'
+  acts
+  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
+  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+}
+
+test_unpushed_commits_survive_a_cleanup_because_orca_keeps_an_unmerged_branch() {
+  world
+  to_build
+  w=$(wt_path)
+  echo feature > "$w/feat.txt"
+  git -C "$w" add feat.txt
+  git -C "$w" commit -q -m "unpushed work"
+  run_done
+  acts
+  [ ! -d "$w" ] || fail "clean worktree not removed"
+  git -C "$TEST_TMP/app" show-ref --verify -q refs/heads/app-7 || fail "branch with unmerged commits was deleted"
+}

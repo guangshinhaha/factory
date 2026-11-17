@@ -30,11 +30,17 @@ world() {
   issues '[]'
   runs '[]'
   prs '[]'
+  worktrees '[]'
 }
 
 issues() { printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body; }
 # prs <json>: open PRs; a PR without isCrossRepository is from the repo itself (false).
 prs() { printf '%s\n' "$1" | jq -c 'map(if type == "object" and (has("isCrossRepository") | not) then . + {isCrossRepository: false} else . end)' | prs_raw; }
+# worktrees <json>: Orca's `worktree ps` rows.
+worktrees() { printf '{"ok":true,"result":{"worktrees":%s,"totalCount":0,"truncated":false}}\n' "$1" | fixture orca worktree ps --json --limit 1000; }
+# wt <path> <branch> <issue> [live] [agents json]: a worktree row of repo app.
+wt() { printf '{"repo":"app","path":"%s","branch":"refs/heads/%s","isMainWorktree":false,"linkedIssue":%s,"liveTerminalCount":%s,"agents":%s}' "$1" "$2" "$3" "${4:-0}" "${5:-[]}"; }
+
 prs_raw() { fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName,isCrossRepository; }
 runs() { printf '{"ok":true,"result":{"runs":%s,"nextCursor":null}}\n' "$1" | fixture orca orchestration run-list --json --full --limit 100; }
 # tasks <run> <json>: the Run's tasks, and an empty inbox (inbox_of sets escalations).
@@ -734,4 +740,66 @@ test_closed_issue_live_run_in_a_rebase_round_is_abandoned() {
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"verify"},{"id":"t3","status":"pending","title":"ship"}]'
   assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
+}
+
+# ---- cleanup ---------------------------------------------------------------------------------
+
+test_cleanup_of_a_closed_issues_idle_factory_worktree() {
+  world
+  worktrees "[$(wt /w/app-7 app-7 7), $(wt /w/debrief-app-7 debrief-app-7 7)]"
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "actions"
+}
+
+test_cleanup_waits_for_an_open_issue_a_live_terminal_an_agent_or_a_live_run() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  worktrees "[$(wt /w/app-7 app-7 7)]"
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "open issue"
+  issues '[]'
+  worktrees "[$(wt /w/app-7 app-7 7 1)]"
+  assert_eq '[]' "$(state)" "live terminal"
+  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"state":"working"}]')]"
+  assert_eq '[]' "$(state)" "live agent"
+  worktrees "[$(wt /w/app-7 app-7 7)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "live run"
+}
+
+test_cleanup_follows_a_finished_run_of_a_closed_issue() {
+  world
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"lessons"}]'
+  worktrees "[$(wt /w/app-7 app-7 7)]"
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"}]' "$(state)" "actions"
+}
+
+test_cleanup_never_touches_a_worktree_the_factory_did_not_make() {
+  world
+  worktrees "[
+    {\"repo\":\"app\",\"path\":\"/main\",\"branch\":\"refs/heads/app-7\",\"isMainWorktree\":true,\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]},
+    $(wt /w/mine feature-x 7),
+    $(wt /w/app-8 app-8 7),
+    $(wt /w/nolink app-7 null),
+    $(wt /w/app-9 app-9 9 | jq -c '.repo = "other"'),
+    $(wt /w/xapp-7 xapp-7 7),
+    {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"},
+    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]}]"
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_a_worktree_read_that_fails_prints_nothing() {
+  world
+  fixture_fail orca worktree ps --json --limit 1000
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
+  printf '{"ok":true,"result":{"worktrees":"x"}}\n' | fixture orca worktree ps --json --limit 1000
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status on a bad list"
+  assert_eq '' "$out" "stdout on a bad list"
 }

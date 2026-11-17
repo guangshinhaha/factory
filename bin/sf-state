@@ -16,12 +16,15 @@
 #                                                        task T stopped without reporting, not yet nudged
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
 #   {"action":"abandon","issue":N,"run":R,"reason":S}    issue N closed before its live Run merged (no debrief)
+#   {"action":"cleanup","issue":N,"worktree":W}          closed issue N has no live Run, and W, a worktree the factory
+#                                                        made for it (not main, linked to N, branch `<repo>-N` or
+#                                                        `debrief-<repo>-N`), has no live terminal and no agent
 # Otherwise a closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task
 # (they run after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
 #
 # Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
 # timeline (the last `ready` label event, and factory marker comments after it), open PRs,
-# and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
+# every Orca worktree (`orca worktree ps`), and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
 # the Run inbox's "Worker stopped without reporting" escalations when a task is dispatched.
 # Any failed read prints nothing on stdout and exits 1, so no action runs on partial state.
 set -eu
@@ -125,6 +128,13 @@ while :; do
   seen_cursors="$seen_cursors$cursor "
 done
 
+# Every Orca worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
+orca worktree ps --json --limit 1000 > "$tmp/worktrees.raw" \
+  || die "Orca worktrees not listed (orca worktree ps failed)"
+jq -se 'length == 1 and (.[0] | .ok == true and (.result.worktrees | type == "array") and all(.result.worktrees[]; type == "object"))' \
+  "$tmp/worktrees.raw" > /dev/null 2>&1 || die "Orca worktrees not listed: $(snippet "$tmp/worktrees.raw")"
+jq -c '.result.worktrees' "$tmp/worktrees.raw" > "$tmp/worktrees.json" || die "Orca worktrees not read (jq failed)"
+
 # Timelines: every ready issue, plus every open issue that is neither ready nor parked
 # (needs-shin, icebox) but has a factory Run, since a dead Run there still owes a stop.
 # A ready issue must have a `ready` label event: without one there is no attempt boundary.
@@ -161,7 +171,8 @@ jq -n -c \
   --slurpfile issues "$tmp/issues.json" \
   --slurpfile prs "$tmp/prs.json" \
   --slurpfile timelines "$tmp/timelines.jsonl" \
-  --slurpfile runs "$tmp/runs.jsonl" '
+  --slurpfile runs "$tmp/runs.jsonl" \
+  --slurpfile worktrees "$tmp/worktrees.json" '
 def lc: ascii_downcase;
 def has_label($l): any(.labels[]; .name == $l);
 def ready: has_label("ready") and (has_label("needs-shin") or has_label("icebox") | not);
@@ -313,7 +324,17 @@ def run_state:
   | ([$idle[] | select(.attempts >= 3) | {action: "stop", issue: .n, reason: "\(.attempts) attempts since it was last labelled ready"}]) as $stops
   | ([$idle[] | select(.attempts < 3 and (.deps | length) > 0) | {action: "hold", issue: .n, reason: "depends on open \(.deps | map("#\(.)") | join(", "))"}]) as $holds
   | ([$idle[] | select(.attempts < 3 and (.deps | length) == 0)] | .[0:$capacity] | map({action: "start", issue: .n})) as $starts
-  | $run_actions + $stops + $holds + $starts | sort_by(.issue)
+  # Cleanup: a closed issue with no live Run, and a worktree made for it by the factory. Only the
+  # names the factory gives count, never other worktrees on the host, and nothing alive in it: no
+  # terminal (sf-act closes those on a stop), no agent.
+  | ([$runs[] | select(.state == "live") | .objective | lc] | map(select(startswith("factory \($repo_lc)#")))) as $live_objs
+  | ([$worktrees[0][] | select(.isMainWorktree != true and (.path | type) == "string" and (.repo // "") == $name and .liveTerminalCount == 0 and ((.agents // []) | length) == 0
+        and (.linkedIssue | type) == "number")
+      | .linkedIssue as $n | ((.branch // "") | ltrimstr("refs/heads/")) as $b
+      | select($b == "\($name)-\($n)" or $b == "debrief-\($name)-\($n)")
+      | select(($open | index($n) | not) and ($live_objs | index("factory \($repo_lc)#\($n)") | not))
+      | {action: "cleanup", issue: $n, worktree: .path}]) as $cleanups
+  | $run_actions + $stops + $holds + $starts + $cleanups | sort_by(.issue)
 ' > "$tmp/actions" 2> "$tmp/jq.err" \
   || die "actions not computed: $(sed 's/^jq: error[^:]*: //' "$tmp/jq.err")"
 cat "$tmp/actions"
