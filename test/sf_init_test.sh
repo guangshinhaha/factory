@@ -314,6 +314,7 @@ test_target_repo_hooks_do_not_block_setup() {
     printf '#!/bin/sh\necho %s >> "%s"\necho "%s: node_modules missing" >&2\nexit 1\n' "$h" "$TEST_TMP/hooks-ran" "$h" > "$hooks/$h"
     chmod +x "$hooks/$h"
   done
+  git -C "$WS" config core.fsmonitor "$hooks/post-checkout" # a hook in all but name
   git -C "$TEST_TMP/seed" commit -q --allow-empty -m ahead # the workspace's fetch updates a ref
   git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
   status=0
@@ -353,7 +354,7 @@ test_origin_off_github_exits_2_without_writes() {
   for url in https://gitlab.com/acme/app.git git@gitlab.com:acme/app.git \
     https://evil.example/x@github.com/acme/app.git https://github.com.evil.example/acme/app.git \
     ssh://git@github.com.evil.example/acme/app.git 'https://evil.example?@github.com/acme/app.git' \
-    'https://evil.example#@github.com/acme/app.git'; do
+    'https://evil.example#@github.com/acme/app.git' file://github.com/acme/app.git; do
     git -C "$WS" remote set-url origin "$url"
     status=0
     sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
