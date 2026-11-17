@@ -598,3 +598,47 @@ test_an_issue_closed_with_a_step_ready_abandons_the_run() {
   assert_eq 0 "$(count_calls gantry-gate-evidence)" "gate runs"
   assert_eq '[]' "$(sh "$FACTORY_ROOT/bin/sf-state" "$REPO" | jq -c .)" "actions after the abandon"
 }
+
+# claude_md <text>: origin's default branch gets this CLAUDE.md.
+claude_md() {
+  printf '%s\n' "$1" > CLAUDE.md
+  git add CLAUDE.md && git_q commit -m claude-md && git_q push origin main
+}
+
+test_a_factory_model_line_overrides_the_station_agent_and_model() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\nfactory-model.intake: codex/codex-auto-review\nfactory-model.build: claude/opus')"
+  acts
+  assert_eq codex/codex-auto-review "$(agent_of intake)" "intake agent"
+  finish intake "$GO"
+  acts
+  assert_eq claude/opus "$(agent_of build)" "build agent"
+}
+
+test_no_factory_model_line_keeps_the_default() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\nfactory-model.build: claude/opus')"
+  acts
+  assert_eq claude/sonnet "$(agent_of intake)" "intake agent"
+}
+
+# bad_model_line <line>: the line stops the issue naming it, and no worker starts.
+bad_model_line() {
+  world
+  claude_md "$(printf 'shinstack-mode: auto\n%s' "$1")"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[$1]"
+  assert_eq failed "$(status_of intake)" "intake"
+  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+}
+test_a_factory_model_line_without_a_slash_stops() { bad_model_line 'factory-model.build: opus'; }
+test_a_factory_model_line_for_an_unknown_station_stops() { bad_model_line 'factory-model.deploy: claude/opus'; }
+test_a_factory_model_line_for_an_unknown_agent_stops() { bad_model_line 'factory-model.build: gemini/pro'; }
+test_a_factory_model_line_with_trailing_text_stops() { bad_model_line 'factory-model.build: claude/opus extra'; }
+
+test_factory_sensitive_forces_review_onto_claude_over_any_review_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true\nfactory-model.review: codex/codex-auto-review')"
+  to_review
+  assert_eq claude/opus "$(agent_of review)" "review agent"
+}

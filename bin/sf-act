@@ -217,7 +217,11 @@ hold_task() {
   sf-hold --repo "$repo" "$issue" "$3" "$4" >&2
 }
 in_an_hour() { jq -nr 'now + 3600 | floor | todate'; }
-provider_of() { [ "$1" = review ] && echo codex || echo claude; }
+# The provider of the station's agent; the table's when the override can't be read.
+provider_of() {
+  pm=$(model_for "$1" 2> /dev/null) || pm=$(default_model "$1")
+  echo "${pm%% *}"
+}
 # limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
 limit_seen() {
   ld=$(o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty')
@@ -271,18 +275,70 @@ brief_for() {
   sf-brief "$@"
 }
 
+# default_model <station>: "agent model" from the launch table (#7).
+default_model() {
+  case "$1" in
+    intake) echo "claude sonnet" ;;
+    plan) echo "claude opus" ;;
+    build) echo "claude sonnet" ;;
+    review) echo "codex codex-auto-review" ;;
+    verify) echo "claude opus" ;;
+    debrief) echo "claude haiku" ;;
+  esac
+}
+
+# model_for <station>: print "agent model": the table's, unless CLAUDE.md on origin's default
+# branch has `factory-model.<station>: <agent>/<model>` (#37). Any malformed or duplicate
+# factory-model line, unknown station or unknown agent fails with the line named, whatever
+# station is asked for. `factory-sensitive: true` keeps review on Claude over any review line.
+model_for() {
+  mf=$(default_model "$1")
+  mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 1; }
+  git -C "$main" show "$mdef:CLAUDE.md" 2> /dev/null | tr -d '\r' > "$tmp/claude.md" || :
+  grep '^[[:space:]]*factory-model\.' "$tmp/claude.md" > "$tmp/models" || :
+  seen=' '
+  while IFS= read -r ml; do
+    ml=$(printf '%s' "$ml" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ms=''
+    if printf '%s\n' "$ml" | grep -Eq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex)/[A-Za-z0-9._-]+$'; then
+      ms=${ml#factory-model.}
+      ms=${ms%%:*}
+    fi
+    case "$ms" in
+      intake | plan | build | review | verify | debrief) ;;
+      *) echo "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex>/<model>"; return 1 ;;
+    esac
+    case "$seen" in *" $ms "*) echo "CLAUDE.md line [$ml] repeats factory-model.$ms"; return 1 ;; esac
+    seen="$seen$ms "
+    if [ "$ms" = "$1" ]; then
+      v=${ml#*:}
+      v=$(printf '%s' "$v" | sed 's/^[[:space:]]*//')
+      mf="${v%%/*} ${v#*/}"
+    fi
+  done < "$tmp/models"
+  if [ "$1" = review ] && grep -Eq '^[[:space:]]*factory-sensitive:[[:space:]]*true[[:space:]]*$' "$tmp/claude.md"; then
+    mf="claude opus"
+  fi
+  echo "$mf"
+}
+
 # start_worker <run> <task>: launch the task's worker per the launch table (#7).
 start_worker() {
   t=$2
   title=$(title_of "$t")
   st=$(station_of "$title")
+  if ! am=$(model_for "$st"); then
+    bind "$1" && give_up "$t" "$st" "$am"
+    return 1
+  fi
+  agent=${am% *} model=${am#* }
   case "$st" in
-    intake) agent=claude model=sonnet wt=$main ;;
-    plan) agent=claude model=opus wt=$main ;;
-    build) agent=claude model=sonnet wt=$(branch_wt "$(branch)") ;;
-    review) agent=codex model=codex-auto-review wt=$(branch_wt "$(branch)") ;;
-    verify) agent=claude model=opus wt=$(branch_wt "$(branch)") ;;
-    debrief) agent=claude model=haiku wt=$(prep "$(debrief_branch)") || return 1 ;;
+    intake) wt=$main ;;
+    plan) wt=$main ;;
+    build) wt=$(branch_wt "$(branch)") ;;
+    review) wt=$(branch_wt "$(branch)") ;;
+    verify) wt=$(branch_wt "$(branch)") ;;
+    debrief) wt=$(prep "$(debrief_branch)") || return 1 ;;
   esac
   [ -n "$wt" ] || { give_up "$t" "$st" "$title worker not started: no worktree on branch $(branch)"; return 1; }
   bind "$1" || return 1
