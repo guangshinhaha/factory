@@ -26,10 +26,11 @@ The factory stops an issue with `sf-stop`: a `factory: stopped. <reason>` commen
    - **Icebox:** `--remove-label needs-shin --add-label icebox`.
    - **Close:** `gh issue close <n> -R <repo> --comment "<Shin's reason>"`, then remove `needs-shin`.
    - **Skip:** change nothing; it stays `needs-shin`.
+   - **Worktree, after a re-ready or a close:** remove that issue's worktrees, which the stop kept for you. `orca worktree list --json`, then take rows that are not the main worktree, whose `linkedIssue` is `<n>` and whose branch is `<repo-name>-<n>` or `debrief-<repo-name>-<n>`. **Never a dirty one:** if `git -C <path> status --porcelain` prints anything, leave it and tell Shin its path. Otherwise `orca worktree rm --worktree path:<path> --delete-branch`. Never touch any other worktree. Icebox and skip keep the worktree.
 5. **Finish** with one line per issue: `#<n>: re-readied | iceboxed | closed | skipped | reconciled`, and X of N cleared.
 
 ## Rules
 
-- Write only what step 2 and Shin's answers name: labels, a body edit Shin saw, a close comment. Never post `factory:` comments or markers, and never call `sf-stop`, `sf-hold` or `sf-ship`.
+- Write only what step 2 and Shin's answers name: labels, a body edit Shin saw, a close comment, and removing the issue's clean worktrees (step 4). Never post `factory:` comments or markers, and never call `sf-stop`, `sf-hold` or `sf-ship`.
 - A stop that names a factory fault (a gate bug, a station that misread the issue) is not fixed by re-readying alone: recommend filing the fault on guangshinhaha/factory as well.
 - Never paste issue content into an external service; issues may hold user data.

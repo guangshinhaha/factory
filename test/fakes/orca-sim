@@ -8,7 +8,9 @@
 # pending; completing a task promotes its dependents. worker-start dispatches a task; the test
 # finishes the worker with test helpers that edit the state (see test/sf_act_test.sh).
 # As in Orca, the concise task-list `title` is the display name when one was given.
-# `orca worktree create` adds a real git worktree; `orca terminal create` is only recorded.
+# `orca worktree create` adds a real git worktree and `worktree rm` removes it (git refuses a
+# dirty one); `worktree ps` lists them with their live terminal count; `terminal create` records a
+# terminal, `terminal list` and `terminal close --terminal` read and drop them.
 #
 # Failure injection: when $ORCA_SIM/fail/<command> exists (e.g. fail/task-create), that command
 # prints the file to stderr and exits 1. fail/<command>.after holds a count of calls to let
@@ -17,7 +19,7 @@ set -u
 
 [ -n "${FAKE_LOG:-}" ] && printf '%s\n' "orca $*" >> "$FAKE_LOG"
 st=$ORCA_SIM/state.json
-[ -f "$st" ] || echo '{"n":0,"runs":[],"tasks":[],"dispatches":[],"inbox":{},"sent":[],"terminals":[]}' > "$st"
+[ -f "$st" ] || echo '{"n":0,"runs":[],"tasks":[],"dispatches":[],"inbox":{},"sent":[],"terminals":[],"worktrees":[]}' > "$st"
 
 ok() { echo '{"ok":true,"result":{}}'; }
 die() { echo "orca-sim: $*" >&2; exit 1; }
@@ -44,11 +46,11 @@ if [ -f "$ORCA_SIM/fail/$cmd" ]; then
   fi
 fi
 
-# Flags into $flags (JSON object); --json, --full and --no-parent take no value.
+# Flags into $flags (JSON object); --json, --full, --no-parent and --delete-branch take no value.
 flags='{}'
 while [ $# -gt 0 ]; do
   case "$1" in
-    --json | --full | --no-parent) flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" '.[$k] = true') ;;
+    --json | --full | --no-parent | --delete-branch | --all | --tab) flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" '.[$k] = true') ;;
     --*)
       [ $# -ge 2 ] || die "$1 needs a value"
       flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" --arg v "$2" '.[$k] = $v')
@@ -135,14 +137,42 @@ case "$cmd" in
         dir=$ORCA_SIM/worktrees/$(fl name)
         mkdir -p "$ORCA_SIM/worktrees"
         git -C "${repo#path:}" worktree add -q -b "$(fl branch)" "$dir" "$(fl base-branch)" > /dev/null 2>&1 || die "worktree not created"
+        dir=$(cd "$dir" && pwd -P) # git reports real paths; so does Orca
+        upd '.worktrees += [{path: $p, branch: $b, repo: $r, issue: (if $i == "" then null else ($i | tonumber) end), repo_path: $rp}]' \
+          --arg p "$dir" --arg b "$(fl branch)" --arg r "$(basename "${repo#path:}")" --arg i "$(fl issue)" --arg rp "${repo#path:}"
         echo '{"ok":true,"result":{}}'
         ;;
       terminal)
-        upd '.terminals += [{worktree: $w, title: $t, command: $c}]' --arg w "$(fl worktree)" --arg t "$(fl title)" --arg c "$(fl command)"
+        upd '.n += 1 | .terminals += [{handle: "term_\(.n)", worktree: $w, title: $t, command: $c}]' --arg w "$(fl worktree)" --arg t "$(fl title)" --arg c "$(fl command)"
         ok
         ;;
       *) die "unknown command $group $cmd" ;;
     esac
+    ;;
+  ps)
+    # The checkout itself is the main worktree; its terminals (sf-act's own) never count for others.
+    jq -c '{ok: true, result: {worktrees: [.worktrees[] | . as $w | {path, branch: "refs/heads/\(.branch)", repo, isMainWorktree: false,
+        linkedIssue: .issue, liveTerminalCount: ([$st.terminals[] | select(.worktree == "path:\($w.path)")] | length)}], totalCount: (.worktrees | length), truncated: false}}' \
+      --argjson st "$(cat "$st")" "$st"
+    ;;
+  list)
+    jq -c --arg w "$(fl worktree)" '{ok: true, result: {terminals: [.terminals[] | select($w == "" or .worktree == $w) | {handle, title}], totalCount: 0, truncated: false}}' "$st"
+    ;;
+  close)
+    upd '.terminals |= map(select(.handle != $h))' --arg h "$(fl terminal)"
+    ok
+    ;;
+  rm)
+    p=$(fl worktree)
+    p=${p#path:}
+    row=$(jq -c --arg p "$p" '.worktrees[] | select(.path == $p)' "$st")
+    [ -n "$row" ] || die "worktree not found: $p"
+    git -C "$(printf '%s' "$row" | jq -r .repo_path)" worktree remove "$p" > /dev/null 2>&1 || die "worktree $p not removed (uncommitted changes?)"
+    if [ "$(fl delete-branch)" = true ]; then
+      git -C "$(printf '%s' "$row" | jq -r .repo_path)" branch -q -D "$(printf '%s' "$row" | jq -r .branch)" > /dev/null 2>&1 || die "branch not deleted"
+    fi
+    upd '.worktrees |= map(select(.path != $p)) | .terminals |= map(select(.worktree != "path:\($p)"))' --arg p "$p"
+    ok
     ;;
   *) die "unknown command $group $cmd" ;;
 esac

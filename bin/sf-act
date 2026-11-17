@@ -31,6 +31,8 @@
 # it gives up on `failed` with a `stop` result before calling sf-stop, so a failed sf-stop
 # leaves a dead Run that sf-state turns into the same stop next fire, never a new Run.
 # An issue closed before its Run shipped gets `abandon`: its workers stopped, open tasks failed.
+# A stop or abandon closes the Run's terminals first (a stop keeps the worktree for triage); a
+# closed issue whose Run is over gets `cleanup`: its worktree and branch removed, never a dirty one.
 #
 # Exit 0: every action done. 1: an action failed (the next fire retries). 2: bad arguments.
 set -u
@@ -205,10 +207,27 @@ prep() {
 
 # ---- giving up -------------------------------------------------------------------------------
 
+# close_terminals: close every live terminal in the issue's worktrees (build and debrief branch),
+# never the main checkout's: sf-act itself runs in one. Idempotent; a failure is retried next fire.
+close_terminals() {
+  for ct_b in "$(branch)" "$(debrief_branch)"; do
+    ct_w=$(branch_wt "$ct_b")
+    [ -n "$ct_w" ] || continue
+    orca terminal list --worktree "path:$ct_w" --json > "$tmp/terms" 2> "$tmp/err" || { log "terminals of $ct_w not listed: $(first "$tmp/err")"; return 1; }
+    ct_h=$(jq -r '.result.terminals[]?.handle // empty' "$tmp/terms" 2> /dev/null | tr -d '\r') || { log "terminals of $ct_w not listed: no terminal array"; return 1; }
+    for ct_t in $ct_h; do
+      orca terminal close --terminal "$ct_t" --json > /dev/null 2> "$tmp/err" || { log "terminal $ct_t of $ct_w not closed: $(first "$tmp/err")"; return 1; }
+    done
+  done
+}
+# stop_now <reason>: sf-stop, after the Run's terminals are closed. A stopped issue keeps its
+# worktree for triage, but no live worker.
+stop_now() { close_terminals || return 1; sf-stop --repo "$repo" "$issue" "$@"; }
+
 # give_up <task> <station> <reason>: mark the task failed with a stop result, then sf-stop.
 give_up() {
   failed_with "$1" "factory-result: {\"station\":$(js "$2"),\"status\":\"stop\",\"reason\":$(js "$3")}" || return 1
-  sf-stop --repo "$repo" "$issue" "$3" >&2
+  stop_now "$3" >&2
 }
 # hold_task <task> <station> <provider> <reset> <reason>: mark the task failed with a hold result,
 # then sf-hold; sf-state restarts the task after <reset>.
@@ -610,7 +629,7 @@ act_start() {
   run=$(jq -r '.result.runId // empty' "$tmp/run")
   [ -n "$run" ] || { log "Run for #$issue not created: run-create printed no runId"; return 1; }
   load "$run" || return 1
-  brief_for intake > "$tmp/brief" 2> "$tmp/err" || { sf-stop --repo "$repo" "$issue" "intake brief not rendered: $(first "$tmp/err")" >&2; return 1; }
+  brief_for intake > "$tmp/brief" 2> "$tmp/err" || { stop_now "intake brief not rendered: $(first "$tmp/err")" >&2; return 1; }
   it=$(create "$run" intake '[]' < "$tmp/brief") || return 1
   echo "inline step: sf-act routes on intake's decision" | create "$run" route "[\"$it\"]" "$it" > /dev/null || return 1
   start_worker "$run" "$it"
@@ -709,16 +728,31 @@ act_abandon() {
     [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
     o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   done
+  close_terminals || return 1
   for t in $open; do
     failed_with "$t" "factory-result: {\"station\":$(js "$(station_of "$(title_of "$t")")"),\"status\":\"stop\",\"reason\":$(js "$2")}" || return 1
   done
   log "#$issue: Run $run abandoned: $2"
 }
 
+# act_cleanup <worktree path>: the issue is closed and its Run over: remove the worktree and its
+# branch. Never a worktree with uncommitted changes: report its path and leave it. A path that is
+# already gone from disk is still handed to Orca, so a crash after git's removal converges.
+act_cleanup() {
+  w=$1
+  { [ -n "$w" ] && [ "$w" != "$main" ]; } || { log "#$issue: cleanup of worktree [$w] refused: not a factory worktree"; return 1; }
+  if [ -d "$w" ]; then
+    dirty=$(git -C "$w" status --porcelain 2> "$tmp/err") || { log "#$issue: worktree $w not checked for changes: $(first "$tmp/err")"; return 1; }
+    [ -z "$dirty" ] || { log "#$issue: worktree $w has uncommitted changes; not removed"; return 1; }
+  fi
+  orca worktree rm --worktree "path:$w" --delete-branch --json > /dev/null 2> "$tmp/err" || { log "#$issue: worktree $w not removed: $(first "$tmp/err")"; return 1; }
+  log "#$issue: removed worktree $w"
+}
+
 # act_stop <reason> [run task [dispatch]]
 act_stop() {
   reason=$1
-  [ -n "${2:-}" ] || { sf-stop --repo "$repo" "$issue" "$reason" >&2; return; }
+  [ -n "${2:-}" ] || { stop_now "$reason" >&2; return; }
   run=$2 t=$3
   load "$run" || return 1
   title=$(title_of "$t")
@@ -740,18 +774,18 @@ act_stop() {
         fi
         ;;
     esac
-    sf-stop --repo "$repo" "$issue" "$title failed with no factory-result line" >&2
+    stop_now "$title failed with no factory-result line" >&2
     return
   fi
   rs=$(rget "$rj" .station)
   status=$(rget "$rj" .status)
-  [ "$rs" = "$st" ] || { sf-stop --repo "$repo" "$issue" "$title result names station [$rs]" >&2; return; }
+  [ "$rs" = "$st" ] || { stop_now "$title result names station [$rs]" >&2; return; }
   if [ "$(outcome_of "$t")" = succeeded ] && ! ok_status "$st" "$status"; then
-    sf-stop --repo "$repo" "$issue" "$title reported success with status [$status]" >&2
+    stop_now "$title reported success with status [$status]" >&2
     return
   fi
   case "$status" in
-    stop) sf-stop --repo "$repo" "$issue" "$title: $(rget "$rj" .reason)" >&2 ;;
+    stop) stop_now "$title: $(rget "$rj" .reason)" >&2 ;;
     hold)
       provider=$(rget "$rj" .provider)
       reset=$(rget "$rj" .reset)
@@ -759,19 +793,19 @@ act_stop() {
       if [ -n "$provider" ] && [ -n "$reset" ]; then
         sf-hold --repo "$repo" "$issue" "$provider" "$reset" >&2
       elif [ -n "$deps" ]; then
-        sf-stop --repo "$repo" "$issue" "$title needs $deps first ($(rget "$rj" .reason)). Add a \`Depends on $deps\` line to the issue, then label it ready again." >&2
+        stop_now "$title needs $deps first ($(rget "$rj" .reason)). Add a \`Depends on $deps\` line to the issue, then label it ready again." >&2
       else
-        sf-stop --repo "$repo" "$issue" "$title hold names no provider and reset, and no depends_on: $(rget "$rj" .reason)" >&2
+        stop_now "$title hold names no provider and reset, and no depends_on: $(rget "$rj" .reason)" >&2
       fi
       ;;
     findings | FAIL)
       if [ "$(round_of "$title")" = 2 ]; then
-        sf-stop --repo "$repo" "$issue" "$title: $status in round 2 ($(rget "$rj" .comment_url))" >&2
+        stop_now "$title: $status in round 2 ($(rget "$rj" .comment_url))" >&2
         return
       fi
       rework "$run" "$t" "$rj"
       ;;
-    *) sf-stop --repo "$repo" "$issue" "$title failed with status [$status]" >&2 ;;
+    *) stop_now "$title failed with status [$status]" >&2 ;;
   esac
 }
 
@@ -816,6 +850,7 @@ while [ $pass -lt 4 ]; do
       ship) act_ship "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .pr)" || arc=$? ;;
       restart) act_restart "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
       nudge) act_nudge "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
+      cleanup) act_cleanup "$(rget "$a" .worktree)" || arc=$? ;;
       abandon) act_abandon "$(rget "$a" .run)" "$(rget "$a" .reason)" || arc=$? ;;
       stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
       *) log "unknown action: $a"; arc=1 ;;
