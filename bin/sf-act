@@ -287,17 +287,17 @@ default_model() {
   esac
 }
 
-# model_for <station>: print "agent model": the table's, unless CLAUDE.md on origin's default
+# model_for <station>: (exit 2: origin or CLAUDE.md not readable, to retry; exit 1: a bad line) print "agent model": the table's, unless CLAUDE.md on origin's default
 # branch has `factory-model.<station>: <agent>/<model>` (#37). Any malformed or duplicate
 # factory-model line, unknown station or unknown agent fails with the line named, whatever
 # station is asked for. `factory-sensitive: true` keeps review on Claude over any review line.
 model_for() {
   mf=$(default_model "$1")
-  git -C "$main" fetch -q origin 2> "$tmp/err" || { echo "origin not fetched: $(first "$tmp/err")"; return 1; }
-  mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 1; }
+  git -C "$main" fetch -q origin 2> "$tmp/err" || { echo "origin not fetched: $(first "$tmp/err")"; return 2; }
+  mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 2; }
   # LC_ALL=C: bytes, so an odd byte in CLAUDE.md can't make tr or grep drop the file.
   git -C "$main" show "$mdef:CLAUDE.md" > "$tmp/claude.raw" 2> /dev/null || : > "$tmp/claude.raw"
-  LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 1; }
+  LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 2; }
   # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
   LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
   LC_ALL=C grep -a '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
@@ -333,7 +333,13 @@ start_worker() {
   t=$2
   title=$(title_of "$t")
   st=$(station_of "$title")
-  if ! am=$(model_for "$st"); then
+  mrc=0
+  am=$(model_for "$st") || mrc=$?
+  if [ $mrc -eq 2 ]; then
+    # Origin or CLAUDE.md not readable: not the repo's mistake, so the next fire retries.
+    log "#$issue: $title worker not started, next fire retries: $am"
+    return 1
+  elif [ $mrc -ne 0 ]; then
     bind "$1" && give_up "$t" "$st" "$am"
     return 1
   fi

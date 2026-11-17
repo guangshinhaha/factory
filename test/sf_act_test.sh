@@ -696,3 +696,12 @@ test_an_invalid_utf8_byte_in_claude_md_keeps_the_overrides() {
   LC_ALL=en_US.UTF-8 acts
   assert_eq codex/codex-auto-review "$(agent_of intake)" "intake agent"
 }
+
+test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
+  world
+  git -C "$TEST_TMP/app" remote set-url origin "$TEST_TMP/gone.git"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
+  assert_contains "$(cat "$TEST_TMP/err")" "next fire retries: origin not fetched"
+}
