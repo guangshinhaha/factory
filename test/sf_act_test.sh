@@ -708,8 +708,9 @@ test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
 
 # ---- cleanup -------------------------------------------------------------------------------------
 
-# wt_path: the issue's build worktree, as Orca and git name it.
-wt_path() { (cd "$ORCA_SIM/worktrees/app-7" && pwd -P); }
+# wt_path: the issue's build worktree, spelled as the sim reports it (Windows spells paths
+# C:/x or /c/x depending on which tool asks, so never recompute it).
+wt_path() { sim '.worktrees[] | select(.branch == "app-7") | .path' | tr -d '\r'; }
 # worker_terminal <handle> [path]: a live terminal in the worktree (default: the build worktree).
 worker_terminal() { sim_set '.terminals += [{handle: $h, worktree: "path:\($w)", title: "worker"}]' --arg h "$1" --arg w "${2:-$(wt_path)}"; }
 # A Run that shipped: every task completed, issue closed.
