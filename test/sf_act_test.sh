@@ -749,6 +749,20 @@ test_a_worktree_with_uncommitted_changes_is_never_removed_and_its_path_is_report
   assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls once clean"
 }
 
+test_a_same_named_worktree_of_another_repo_is_never_removed() {
+  world
+  to_build
+  w=$(wt_path)
+  run_done
+  rm -rf "$w"
+  git clone -q "$TEST_TMP/app" "$w"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "not a worktree of this repo" "stderr"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  [ -d "$w" ] || fail "foreign worktree removed"
+}
+
 test_a_worktree_whose_state_cannot_be_read_is_never_removed() {
   world
   to_build

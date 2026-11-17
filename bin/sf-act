@@ -736,6 +736,8 @@ act_abandon() {
   log "#$issue: Run $run abandoned: $2"
 }
 
+# common_dir <path>: the real path of the git dir the checkout at <path> shares (empty if unreadable).
+common_dir() { (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P) 2> /dev/null; }
 # act_cleanup <worktree path>: the issue is closed and its Run over: remove the worktree and its
 # branch. Never a worktree with uncommitted changes: report its path and leave it. A path that is
 # already gone from disk is still handed to Orca, so a crash after git's removal converges.
@@ -743,6 +745,9 @@ act_cleanup() {
   w=$1
   { [ -n "$w" ] && [ "$w" != "$main" ]; } || { log "#$issue: cleanup of worktree [$w] refused: not a factory worktree"; return 1; }
   if [ -d "$w" ]; then
+    # Same repo only: a same-named repo of another owner shares the name sf-state matched on.
+    cd_w=$(common_dir "$w")
+    { [ -n "$cd_w" ] && [ "$cd_w" = "$(common_dir "$main")" ]; } || { log "#$issue: cleanup of worktree $w refused: not a worktree of this repo"; return 1; }
     dirty=$(git -C "$w" status --porcelain 2> "$tmp/err") || { log "#$issue: worktree $w not checked for changes: $(first "$tmp/err")"; return 1; }
     [ -z "$dirty" ] || { log "#$issue: worktree $w has uncommitted changes; not removed"; return 1; }
   fi
