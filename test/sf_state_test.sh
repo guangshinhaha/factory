@@ -692,13 +692,14 @@ test_failed_inbox_read_is_an_error() {
   assert_contains "$(cat "$TEST_TMP/err")" "inbox of Run run_a not read" "stderr"
 }
 
+# A closed issue's Run advances only debrief and lessons after the merge; before ship, abandon.
 test_closed_issue_live_run_advances_only_debrief_and_lessons() {
   world
   issues '[]'
   runs "[$(run_json run_a 7),$(run_json run_b 8)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"debrief"}]'
   tasks run_b '[{"id":"t1","status":"ready","title":"review"}]'
-  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
+  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"},{"action":"abandon","issue":8,"run":"run_b","reason":"issue #8 closed before the Run shipped"}]' "$(state)" "actions"
 }
 
 test_closed_issue_live_run_finishes_a_ready_ship() {
@@ -707,4 +708,20 @@ test_closed_issue_live_run_finishes_a_ready_ship() {
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"verify"},{"id":"t2","status":"ready","title":"ship"}]'
   assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"}]' "$(state)" "actions"
+}
+
+test_closed_issue_live_run_before_ship_is_abandoned() {
+  world
+  issues '[]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t2","status":"ready","title":"gate"}]'
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
+}
+
+test_closed_issue_live_run_after_ship_waits_for_its_debrief() {
+  world
+  issues '[]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"dispatched","title":"debrief"},{"id":"t3","status":"pending","title":"lessons"}]'
+  assert_eq '[]' "$(state)" "actions"
 }

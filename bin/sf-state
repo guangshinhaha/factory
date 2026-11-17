@@ -15,8 +15,9 @@
 #   {"action":"nudge","issue":N,"run":R,"task":T,"dispatch":D}  Orca reported the worker of dispatched
 #                                                        task T stopped without reporting, not yet nudged
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
-# A closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task (they run
-# after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
+#   {"action":"abandon","issue":N,"run":R,"reason":S}    issue N closed before its live Run's ship completed
+# Otherwise a closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task
+# (they run after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
 #
 # Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
 # timeline (the last `ready` label event, and factory marker comments after it), open PRs,
@@ -293,12 +294,15 @@ def run_state:
       else empty end;
 
   # A closed issue (merged) still runs its debrief and lessons tasks, and finishes a ship task a
-  # fire died in after the merge.
+  # fire died in after the merge. Closed before ship completed (by hand, or another PR), the Run
+  # is abandoned: left live, it would hold a host slot forever.
   ([$runs[] | select(.state == "live") | . as $r
     | (.objective | lc | capture("^factory (?<r>[^#]+)#(?<n>[0-9]+)$")) as $o
     | select($o.r == $repo_lc and ($open | index($o.n | tonumber) | not))
-    | .tasks[] | select(.status == "ready" and (.title == "debrief" or .title == "lessons" or .title == "ship"))
-    | {action: "advance", issue: ($o.n | tonumber), run: $r.id, task: .id}]) as $closed_actions
+    | [.tasks[] | select(.status == "ready" and (.title == "debrief" or .title == "lessons" or .title == "ship"))] as $after
+    | if ($after | length) > 0 then $after[] | {action: "advance", issue: ($o.n | tonumber), run: $r.id, task: .id}
+      elif any(.tasks[]; .title == "ship" and .status == "completed") then empty
+      else {action: "abandon", issue: ($o.n | tonumber), run: $r.id, reason: "issue #\($o.n) closed before the Run shipped"} end]) as $closed_actions
   | ([$cands[] | select(.run != null) | run_actions(.)] + $closed_actions) as $run_actions
   # A restart revives a Run, so it takes a slot a start would otherwise get.
   | ([$run_actions[] | select(.action == "restart") | .run] | unique | length) as $restarting

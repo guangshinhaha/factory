@@ -564,3 +564,31 @@ test_a_ship_left_ready_on_an_issue_closed_without_a_merge_completes_without_a_de
   assert_eq completed "$(status_of ship)" "ship"
   assert_eq none "$(status_of debrief)" "debrief"
 }
+
+# An issue closed while its Run is mid-build (by hand, or another PR's `Closes`): the Run is
+# abandoned, its worker stopped and its open tasks failed, so it never holds a slot forever.
+test_an_issue_closed_mid_run_abandons_the_run() {
+  world
+  to_build
+  sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end)' --arg d "$(dispatch_of build)"
+  issues '[]'
+  acts
+  assert_eq failed "$(status_of build)" "build"
+  assert_eq true "$(sim --arg d "$(dispatch_of build)" '.dispatches[] | select(.id == $d) | .stopped // false')" "build worker stopped"
+  assert_eq 0 "$(sim '[.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending")] | length')" "open tasks"
+  assert_contains "$(sim '[.tasks[] | select(.title == "build")][0].result')" '"status":"stop"'
+  assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
+  assert_eq '[]' "$(sh "$FACTORY_ROOT/bin/sf-state" "$REPO" | jq -c .)" "actions after the abandon"
+}
+
+# Closed between build and gate: the ready gate is abandoned, not left ready forever.
+test_an_issue_closed_with_a_step_ready_abandons_the_run() {
+  world
+  to_build
+  issues '[]'
+  finish build "$BUILT"
+  acts
+  assert_eq failed "$(status_of gate)" "gate"
+  assert_eq 0 "$(count_calls gantry-gate-evidence)" "gate runs"
+  assert_eq '[]' "$(sh "$FACTORY_ROOT/bin/sf-state" "$REPO" | jq -c .)" "actions after the abandon"
+}

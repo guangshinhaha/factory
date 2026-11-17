@@ -42,7 +42,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Windows Git Bash forks slowly: sf-act's multi-fire sim tests take ~45s each there.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 10 }}
     permissions:
       contents: read
     defaults:

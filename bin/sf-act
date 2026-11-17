@@ -30,6 +30,7 @@
 # sf-hold; findings or FAIL in round 1 -> round 2; anything else -> sf-stop. sf-act marks a task
 # it gives up on `failed` with a `stop` result before calling sf-stop, so a failed sf-stop
 # leaves a dead Run that sf-state turns into the same stop next fire, never a new Run.
+# An issue closed before its Run shipped gets `abandon`: its workers stopped, open tasks failed.
 #
 # Exit 0: every action done. 1: an action failed (the next fire retries). 2: bad arguments.
 set -u
@@ -627,6 +628,25 @@ act_nudge() {
     --json > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
 }
 
+# act_abandon <run> <reason>: the issue closed before ship: stop the Run's workers, then fail its
+# open tasks, so the Run is dead and frees its slot. A worker Orca can't account for is left for
+# the next fire, so no worker outlives the abandon.
+act_abandon() {
+  run=$1
+  load "$run" || return 1
+  bind "$run" || return 1
+  open=$(jq -r '.result.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending") | .id' "$tmp/tasks.json")
+  for t in $open; do
+    lw=$(live_worker "$t") || continue
+    [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
+    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+  done
+  for t in $open; do
+    failed_with "$t" "factory-result: {\"station\":$(js "$(station_of "$(title_of "$t")")"),\"status\":\"stop\",\"reason\":$(js "$2")}" || return 1
+  done
+  log "#$issue: Run $run abandoned: $2"
+}
+
 # act_stop <reason> [run task [dispatch]]
 act_stop() {
   reason=$1
@@ -727,6 +747,7 @@ while [ $pass -lt 4 ]; do
       ship) act_ship "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .pr)" || arc=$? ;;
       restart) act_restart "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
       nudge) act_nudge "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
+      abandon) act_abandon "$(rget "$a" .run)" "$(rget "$a" .reason)" || arc=$? ;;
       stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
       *) log "unknown action: $a"; arc=1 ;;
     esac
