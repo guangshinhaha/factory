@@ -72,10 +72,10 @@ while read -r kind url; do
   u=${u%/}
   u=${u%.git}
   case "$u" in
-    *://*) # scheme://[user@]host[:port]/owner/repo
+    *://*) # scheme://[user@]host[:port]/owner/repo; the host part ends at the first / ? or #
       u=${u#*://}
-      host=${u%%/*}
-      path=${u#*/}
+      host=${u%%[/?#]*}
+      path=${u#"$host"}
       ;;
     *:*) # git's scp form [user@]host:owner/repo; a slash before the colon makes it a path
       host=${u%%:*}
@@ -195,7 +195,7 @@ else
         { if [ -s "$tmp/claude" ]; then cat "$tmp/claude" && echo; fi && cat "$tmp/claude.add"; } > "$wt/CLAUDE.md"
       fi
     fi
-    { git -C "$wt" add -A -- .github/gantry-risky-paths CLAUDE.md \
+    { git -c core.hooksPath="$nohooks" -C "$wt" add -A -- .github/gantry-risky-paths CLAUDE.md \
       && git -c core.hooksPath="$nohooks" -C "$wt" commit -q -m "chore: set up the factory (sf-init)"; } \
       || die "factory setup not committed on $branch (git commit failed)"
     # The branch is the factory's own: replace a stale one from a closed PR, but only the copy
