@@ -295,23 +295,26 @@ model_for() {
   mf=$(default_model "$1")
   git -C "$main" fetch -q origin 2> "$tmp/err" || { echo "origin not fetched: $(first "$tmp/err")"; return 1; }
   mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 1; }
-  git -C "$main" show "$mdef:CLAUDE.md" 2> /dev/null | tr -d '\r' > "$tmp/claude.md" || :
-  grep '^[[:space:]]*factory-model\.' "$tmp/claude.md" > "$tmp/models" || :
-  grep '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | grep -Ev '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
-  if [ -s "$tmp/bad" ]; then echo "CLAUDE.md line [$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
+  # LC_ALL=C: bytes, so an odd byte in CLAUDE.md can't make tr or grep drop the file.
+  git -C "$main" show "$mdef:CLAUDE.md" > "$tmp/claude.raw" 2> /dev/null || : > "$tmp/claude.raw"
+  LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 1; }
+  # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
+  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
+  LC_ALL=C grep -a '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  if [ -s "$tmp/bad" ]; then printf '%s\n' "CLAUDE.md line [$(LC_ALL=C sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
   seen=' '
   while IFS= read -r ml; do
-    ml=$(printf '%s' "$ml" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ml=$(printf '%s' "$ml" | LC_ALL=C sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     ms=''
-    if printf '%s\n' "$ml" | grep -Eq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex)/[A-Za-z0-9._-]+$'; then
+    if printf '%s\n' "$ml" | LC_ALL=C grep -aEq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex)/[A-Za-z0-9._-]+$'; then
       ms=${ml#factory-model.}
       ms=${ms%%:*}
     fi
     case "$ms" in
       intake | plan | build | review | verify | debrief) ;;
-      *) echo "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex>/<model>"; return 1 ;;
+      *) printf '%s\n' "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex>/<model>"; return 1 ;;
     esac
-    case "$seen" in *" $ms "*) echo "CLAUDE.md line [$ml] repeats factory-model.$ms"; return 1 ;; esac
+    case "$seen" in *" $ms "*) printf '%s\n' "CLAUDE.md line [$ml] repeats factory-model.$ms"; return 1 ;; esac
     seen="$seen$ms "
     if [ "$ms" = "$1" ]; then
       v=${ml#*:}
@@ -319,7 +322,7 @@ model_for() {
       mf="${v%%/*} ${v#*/}"
     fi
   done < "$tmp/models"
-  if [ "$1" = review ] && grep -Eq '^[[:space:]]*factory-sensitive:[[:space:]]*true[[:space:]]*$' "$tmp/claude.md"; then
+  if [ "$1" = review ] && LC_ALL=C grep -aEq '^[[:space:]]*factory-sensitive:[[:space:]]*true[[:space:]]*$' "$tmp/claude.md"; then
     mf="claude opus"
   fi
   echo "$mf"

@@ -683,3 +683,16 @@ test_an_override_pushed_to_origin_since_the_last_fetch_applies() {
   acts
   assert_eq claude/opus "$(agent_of intake)" "intake agent"
 }
+
+test_a_factory_model_line_missing_its_dot_stops() { bad_model_line 'factory-model: build claude/opus'; }
+test_a_bulleted_factory_model_line_stops() { bad_model_line '- factory-model.intake: codex/codex-auto-review'; }
+test_a_factory_model_line_in_another_case_stops() { bad_model_line 'Factory-Model.build: claude/opus'; }
+test_a_stop_reason_keeps_a_backslash_in_the_line() { bad_model_line 'factory-model.build: claude/x\c y'; }
+
+test_an_invalid_utf8_byte_in_claude_md_keeps_the_overrides() {
+  world
+  printf 'caf\351\nfactory-model.intake: codex/codex-auto-review\n' > CLAUDE.md
+  git add CLAUDE.md && git_q commit -m latin1 && git_q push origin main
+  LC_ALL=en_US.UTF-8 acts
+  assert_eq codex/codex-auto-review "$(agent_of intake)" "intake agent"
+}
