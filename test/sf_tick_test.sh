@@ -168,3 +168,28 @@ EOF
   assert_eq dispatched "$(status_of intake)" "intake"
   [ ! -e "$FACTORY_TICK_LOCK" ] || fail "lock kept after the respawned sf-act: $(cat "$TEST_TMP/act.out")"
 }
+
+test_a_lock_a_late_sf_act_claimed_during_the_tick_is_not_released() {
+  tick_world
+  mkdir "$FACTORY_TICK_LOCK"
+  age "$FACTORY_TICK_LOCK" 5
+  sleep 300 &
+  late=$!
+  # sf-state's first gh call: the late sf-act of the taken-over lock claims the new one.
+  cat > "$TEST_TMP/bin/gh" <<W
+#!/bin/sh
+[ -f "$FACTORY_TICK_LOCK/pid" ] || (set -C; echo $late > "$FACTORY_TICK_LOCK/pid") 2> /dev/null
+exec sh "$FACTORY_ROOT/test/fakes/gh" "\$@"
+W
+  chmod +x "$TEST_TMP/bin/gh"
+  issues '[]'
+  tick
+  rm -f "$TEST_TMP/bin/gh"
+  assert_contains "$(cat "$TEST_TMP/tick.out")" "nothing to do"
+  assert_eq "$late" "$(cat "$FACTORY_TICK_LOCK/pid" 2> /dev/null)" "pid in the lock"
+  issues "[$(jq -cn '{number: 7, labels: [{name: "ready"}], body: "x"}')]"
+  tick
+  kill "$late"
+  assert_contains "$(cat "$TEST_TMP/tick.out")" "another tick holds"
+  assert_eq 0 "$(terminals)" "terminals"
+}

@@ -109,13 +109,14 @@ case "$cmd" in
     ;;
   worker-show)
     # A dispatch is exited unless a test set its liveness (sim_set); no such dispatch fails.
-    jq -c --arg d "$(fl dispatch)" '[.dispatches[] | select(.id == $d)] | first as $w
-      | if $w then {ok: true, result: {dispatchId: $w.id, liveness: ($w.liveness // "exited")}} else {ok: false} end' "$st"
-    jq -e --arg d "$(fl dispatch)" 'any(.dispatches[]; .id == $d)' "$st" > /dev/null || exit 1
+    jq -e --arg d "$(fl dispatch)" 'any(.dispatches[]; .id == $d)' "$st" > /dev/null \
+      || die "dispatch_not_found: Worker Dispatch $(fl dispatch) was not found."
+    jq -c --arg d "$(fl dispatch)" '.dispatches[] | select(.id == $d)
+      | {ok: true, result: {dispatchId: .id, liveness: (.liveness // "exited")}}' "$st"
     ;;
   dispatch-show)
     jq -c --arg t "$(fl task)" '[.dispatches[] | select(.task == $t)] | last as $d
-      | if $d then {ok: true, result: {dispatch: {id: $d.id}}} else {ok: false} end' "$st"
+      | {ok: true, result: {dispatch: (if $d then {id: $d.id} else null end)}}' "$st"
     ;;
   worker-read)
     if [ -f "$ORCA_SIM/terminal/$(fl dispatch)" ]; then cat "$ORCA_SIM/terminal/$(fl dispatch)"; else ok; fi

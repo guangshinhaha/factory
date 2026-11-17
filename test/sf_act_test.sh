@@ -428,3 +428,96 @@ test_a_lock_taken_over_while_acting_is_not_removed_on_exit() {
   [ -d "$TEST_TMP/lock" ] || fail "the new holder's lock was removed"
   assert_eq 999999 "$(cat "$TEST_TMP/lock/pid")" "pid in the lock"
 }
+
+# Seen in the e2e: a worker ends its body's only line with the result instead of a line of its own.
+test_a_result_at_the_end_of_the_last_line_counts_and_is_never_posted() {
+  world
+  acts
+  finish intake "Read the issue; it can be built. $PLAN_FIRST"
+  acts
+  assert_eq dispatched "$(status_of plan)" "plan"
+  finish plan "$(printf '## Plan\n1. add greet, then test it. factory-result: {"station":"plan","status":"planned"}')"
+  : > "$FAKE_LOG.stdin"
+  acts
+  posted=$(fake_stdin)
+  assert_contains "$posted" "1. add greet, then test it."
+  case "$posted" in *factory-result*) fail "a factory-result line was posted: $posted" ;; esac
+  assert_eq dispatched "$(status_of build)" "build after the plan"
+}
+
+test_an_orca_read_failure_never_counts_as_the_old_worker_gone() {
+  for cmd in dispatch-show worker-show; do
+    world
+    acts
+    d=$(dispatch_of intake)
+    sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end) | .tasks |= map(if .title == "intake" then .status = "ready" else . end)' --arg d "$d"
+    orca_fails "$cmd"
+    act
+    assert_eq 1 "$act_status" "sf-act exit status with $cmd failing"
+    assert_eq 1 "$(sim '[.dispatches[] | select(.task == $t)] | length' --arg t "$(id_of intake)")" "intake dispatches with $cmd failing"
+    orca_ok "$cmd"
+    rm -rf "${TEST_TMP:?}"/* 2> /dev/null
+  done
+}
+
+# Interrogate findings (#7): every result a worker reports is checked before anything builds on it.
+test_verify_never_starts_on_a_review_without_a_success_result() {
+  for body in 'looks fine to me' 'factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":3}'; do
+    world
+    to_review
+    finish review "$body"
+    act
+    assert_eq "" "$(dispatch_of verify)" "verify dispatch after review [$body]"
+    assert_eq failed "$(status_of verify)" "verify after review [$body]"
+    [ "$(count_calls sf-stop)" -ge 1 ] || fail "no sf-stop after review [$body]"
+    rm -rf "${TEST_TMP:?}"/* 2> /dev/null
+  done
+}
+
+test_a_worker_claiming_reworked_is_refused() {
+  world
+  to_build
+  echo "PASS: pushed app-7" | fixture gantry-gate-evidence --force-with-lease
+  finish build 'factory-result: {"station":"build","status":"reworked"}'
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "build completed with status [reworked]"
+}
+
+# The sf-stop stub leaves the ready label, so later passes stop the dead Run again; real sf-stop
+# takes the issue out of the factory. What matters: it stops, and build never starts.
+test_intake_go_without_a_valid_tier_stops() {
+  world
+  acts
+  finish intake 'factory-result: {"station":"intake","status":"go"}'
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "intake go has tier []"
+  assert_eq failed "$(status_of route)" "route"
+  assert_eq none "$(status_of build)" "build"
+}
+
+test_a_nudge_whose_marker_fails_is_never_sent_twice() {
+  world
+  acts
+  escalation intake 2026-11-03T00:00:00Z
+  fixture gh issue comment 7 -R "$REPO" --body-file - < /dev/null
+  fixture_exit 1 "gh: HTTP 502"
+  act
+  act
+  act
+  [ "$(sim '.sent | length')" -le 1 ] || fail "nudges sent: $(sim '.sent | length')"
+}
+
+test_a_merge_completes_ship_even_when_the_debrief_cannot_be_queued() {
+  world
+  to_review
+  finish review "$CLEAN"
+  acts
+  prs '[{"number":12,"headRefName":"app-7","isCrossRepository":false}]'
+  open_pr app-7 12
+  echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  orca_fails task-create "orca: down"
+  act
+  assert_eq completed "$(status_of ship)" "ship"
+  assert_contains "$(cat "$TEST_TMP/err")" "no debrief: not queued after the merge"
+}

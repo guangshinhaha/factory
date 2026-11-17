@@ -61,7 +61,8 @@ if ! take; then
   echo "$me: another tick holds $lock; nothing done"
   exit 1
 fi
-release() { rm -rf "$lock"; }
+# release: drop the lock unless an sf-act has claimed it (a late one from a taken-over lock).
+release() { [ -f "$lock/pid" ] || rm -rf "$lock"; }
 
 if ! actions=$(sh "$bindir/sf-state" "$repo"); then
   release
