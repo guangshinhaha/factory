@@ -54,21 +54,22 @@ trap 'rm -rf "$tmp"' EXIT
 # Open issues, once. `--label`/`--search` would go through the search API (shinfactory#175).
 gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "$tmp/issues.json" \
   || die "open issues not listed (gh issue list failed)"
-jq -e 'type == "array"' "$tmp/issues.json" > /dev/null 2>&1 || die "open issues not listed: gh issue list printed no JSON array"
+jq -se 'length == 1 and (.[0] | type == "array")' "$tmp/issues.json" > /dev/null 2>&1 \
+  || die "open issues not listed: gh issue list printed no single JSON array"
 
 # A fork PR is never the factory's, whatever its branch is named: drop it before matching.
 gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCrossRepository > "$tmp/prs.raw" \
   || die "open PRs not listed (gh pr list failed)"
-jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean"))' "$tmp/prs.raw" > /dev/null 2>&1 \
-  || die "open PRs not listed: gh pr list printed no array of PRs with number, headRefName and isCrossRepository"
+jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number") and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))' "$tmp/prs.raw" > /dev/null 2>&1 \
+  || die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository"
 jq -c '[.[] | select(.isCrossRepository == false)]' "$tmp/prs.raw" > "$tmp/prs.json" || die "open PRs not filtered (jq failed)"
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
 
 # Every factory Run host-wide (run-list is host-wide), page by page, with its tasks.
-# Each page and task list is checked for shape before use, so malformed JSON fails closed
-# instead of looking like no Runs.
+# Each page and task list is checked whole (slurped: exactly one JSON document) for shape
+# before use, so malformed JSON fails closed instead of looking like no Runs.
 factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/runs.jsonl"
 cursor=
@@ -81,7 +82,7 @@ while :; do
     orca orchestration run-list --json --full --limit 100 > "$tmp/page" \
       || die "Orca Runs not listed (orca orchestration run-list failed)"
   fi
-  jq -e '.ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string"))' \
+  jq -se 'length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))' \
     "$tmp/page" > /dev/null 2>&1 || die "Orca Runs not listed: $(snippet "$tmp/page")"
   jq -r --arg re "$factory_objective" \
     '.result.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv' \
@@ -90,8 +91,8 @@ while :; do
   while IFS="$(printf '\t')" read -r id objective created; do
     orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
-    jq -c -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
-      'select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
+    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
+      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
       "$tmp/tasks" >> "$tmp/runs.jsonl" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
   done < "$tmp/factory-runs.tsv"
   cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')

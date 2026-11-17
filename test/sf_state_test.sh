@@ -590,3 +590,37 @@ test_run_list_repeating_its_cursor_is_an_error() {
   printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
   fails_with "sf-state: Orca Runs not listed: run-list repeated cursor [c2]"
 }
+
+# 31: each read is checked whole. A wrong-shaped document before a valid one fails closed,
+# instead of the shape check seeing only the last document.
+test_issue_list_with_a_bad_document_before_a_good_one_is_an_error() {
+  world
+  printf '{"message":"Bad credentials"}\n[%s]\n' "$(ready_issue_json 7)" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body
+  readied 7
+  fails_with "sf-state: open issues not listed: gh issue list printed"
+}
+
+test_pr_list_with_a_bad_document_before_a_good_one_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"message":"Bad credentials"}\n[]\n' | prs_raw
+  fails_with "sf-state: open PRs not listed: gh pr list printed"
+}
+
+test_run_list_with_a_bad_document_before_a_good_one_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":false,"result":{"runs":[]}}\n{"ok":true,"result":{"runs":[],"nextCursor":null}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  fails_with "sf-state: Orca Runs not listed"
+}
+
+test_task_list_with_a_bad_document_before_a_good_one_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  printf '{"ok":false,"result":{"tasks":[]}}\n{"ok":true,"result":{"tasks":[{"id":"t1","status":"dispatched","title":"build"}]}}\n' | fixture orca orchestration task-list --run run_a --json
+  fails_with "sf-state: tasks of Run run_a not listed"
+}
