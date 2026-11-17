@@ -36,6 +36,11 @@ shift
 cmd=$1
 shift
 
+# Bad output: when $ORCA_SIM/fail/<command>.out exists, that command prints it to stdout and exits 0.
+if [ -f "$ORCA_SIM/fail/$cmd.out" ]; then
+  cat "$ORCA_SIM/fail/$cmd.out"
+  exit 0
+fi
 if [ -f "$ORCA_SIM/fail/$cmd" ]; then
   after=$(cat "$ORCA_SIM/fail/$cmd.after" 2> /dev/null || echo 0)
   if [ "$after" -gt 0 ]; then
@@ -168,8 +173,9 @@ case "$cmd" in
     row=$(jq -c --arg p "$p" '.worktrees[] | select(.path == $p)' "$st")
     [ -n "$row" ] || die "worktree not found: $p"
     git -C "$(printf '%s' "$row" | jq -r .repo_path)" worktree remove "$p" > /dev/null 2>&1 || die "worktree $p not removed (uncommitted changes?)"
+    # Like Orca: a branch whose changes are not proven merged is kept (git's safe delete refuses it).
     if [ "$(fl delete-branch)" = true ]; then
-      git -C "$(printf '%s' "$row" | jq -r .repo_path)" branch -q -D "$(printf '%s' "$row" | jq -r .branch)" > /dev/null 2>&1 || die "branch not deleted"
+      git -C "$(printf '%s' "$row" | jq -r .repo_path)" branch -q -d "$(printf '%s' "$row" | jq -r .branch)" > /dev/null 2>&1 || :
     fi
     upd '.worktrees |= map(select(.path != $p)) | .terminals |= map(select(.worktree != "path:\($p)"))' --arg p "$p"
     ok

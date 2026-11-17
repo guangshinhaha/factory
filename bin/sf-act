@@ -214,7 +214,8 @@ close_terminals() {
     ct_w=$(branch_wt "$ct_b")
     [ -n "$ct_w" ] || continue
     orca terminal list --worktree "path:$ct_w" --json > "$tmp/terms" 2> "$tmp/err" || { log "terminals of $ct_w not listed: $(first "$tmp/err")"; return 1; }
-    ct_h=$(jq -r '.result.terminals[]?.handle // empty' "$tmp/terms" 2> /dev/null | tr -d '\r') || { log "terminals of $ct_w not listed: no terminal array"; return 1; }
+    jq -er '.ok == true and (.result.terminals | type == "array") and all(.result.terminals[]; .handle | type == "string")' "$tmp/terms" > /dev/null 2>&1 || { log "terminals of $ct_w not listed: $(first "$tmp/terms")"; return 1; }
+    ct_h=$(jq -r '.result.terminals[].handle' "$tmp/terms" | tr -d '\r')
     for ct_t in $ct_h; do
       orca terminal close --terminal "$ct_t" --json > /dev/null 2> "$tmp/err" || { log "terminal $ct_t of $ct_w not closed: $(first "$tmp/err")"; return 1; }
     done

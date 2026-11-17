@@ -131,7 +131,7 @@ done
 # Every Orca worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
 orca worktree ps --json --limit 1000 > "$tmp/worktrees.raw" \
   || die "Orca worktrees not listed (orca worktree ps failed)"
-jq -se 'length == 1 and (.[0] | .ok == true and (.result.worktrees | type == "array") and all(.result.worktrees[]; .path | type == "string"))' \
+jq -se 'length == 1 and (.[0] | .ok == true and (.result.worktrees | type == "array") and all(.result.worktrees[]; type == "object"))' \
   "$tmp/worktrees.raw" > /dev/null 2>&1 || die "Orca worktrees not listed: $(snippet "$tmp/worktrees.raw")"
 jq -c '.result.worktrees' "$tmp/worktrees.raw" > "$tmp/worktrees.json" || die "Orca worktrees not read (jq failed)"
 
@@ -328,7 +328,7 @@ def run_state:
   # names the factory gives count, never other worktrees on the host, and nothing alive in it: no
   # terminal (sf-act closes those on a stop), no agent.
   | ([$runs[] | select(.state == "live") | .objective | lc] | map(select(startswith("factory \($repo_lc)#")))) as $live_objs
-  | ([$worktrees[0][] | select(.isMainWorktree != true and (.repo // "") == $name and .liveTerminalCount == 0 and ((.agents // []) | length) == 0
+  | ([$worktrees[0][] | select(.isMainWorktree != true and (.path | type) == "string" and (.repo // "") == $name and .liveTerminalCount == 0 and ((.agents // []) | length) == 0
         and (.linkedIssue | type) == "number")
       | .linkedIssue as $n | ((.branch // "") | ltrimstr("refs/heads/")) as $b
       | select($b == "\($name)-\($n)" or $b == "debrief-\($name)-\($n)")

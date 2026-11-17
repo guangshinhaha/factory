@@ -784,7 +784,8 @@ test_cleanup_never_touches_a_worktree_the_factory_did_not_make() {
     $(wt /w/nolink app-7 null),
     $(wt /w/app-9 app-9 9 | jq -c '.repo = "other"'),
     $(wt /w/xapp-7 xapp-7 7),
-    {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"}]"
+    {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"},
+    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]}]"
   assert_eq '[]' "$(state)" "actions"
 }
 
