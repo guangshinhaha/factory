@@ -704,7 +704,8 @@ test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
   assert_eq 1 "$act_status" "sf-act exit status"
   assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
   assert_contains "$(cat "$TEST_TMP/err")" "next fire retries: origin not fetched"
-=======
+}
+
 # ---- cleanup -------------------------------------------------------------------------------------
 
 # wt_path: the issue's build worktree, as Orca and git name it.
@@ -837,7 +838,6 @@ test_an_abandoned_runs_terminals_are_closed_so_its_worktree_can_be_cleaned_up() 
   acts
   assert_eq 0 "$(sim '.terminals | length')" "terminals left"
   assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
->>>>>>> c41defe (feat: clean up finished Orca workers and worktrees (#34))
 }
 
 test_unpushed_commits_survive_a_cleanup_because_orca_keeps_an_unmerged_branch() {
