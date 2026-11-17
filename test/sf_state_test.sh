@@ -725,3 +725,13 @@ test_closed_issue_live_run_after_ship_waits_for_its_debrief() {
   tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"dispatched","title":"debrief"},{"id":"t3","status":"pending","title":"lessons"}]'
   assert_eq '[]' "$(state)" "actions"
 }
+
+# sf-ship rebased: the first ship completed and a new review, verify and ship were queued. Closed
+# then, the Run hasn't merged: abandon.
+test_closed_issue_live_run_in_a_rebase_round_is_abandoned() {
+  world
+  issues '[]'
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"verify"},{"id":"t3","status":"pending","title":"ship"}]'
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
+}

@@ -562,7 +562,7 @@ act_advance() {
       start_worker "$run" "$t"
       ;;
     plan | build | review | verify | debrief)
-      for dep in $(jq -r --arg t "$t" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[]' "$tmp/tasks.json"); do
+      for dep in $(jq -r --arg t "$t" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[]' "$tmp/tasks.json" | tr -d '\r'); do
         ds=$(station_of "$(title_of "$dep")")
         case "$ds" in
           intake | plan | build | review | verify | debrief)
@@ -635,7 +635,7 @@ act_abandon() {
   run=$1
   load "$run" || return 1
   bind "$run" || return 1
-  open=$(jq -r '.result.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending") | .id' "$tmp/tasks.json")
+  open=$(jq -r '.result.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending") | .id' "$tmp/tasks.json" | tr -d '\r')
   for t in $open; do
     lw=$(live_worker "$t") || continue
     [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
@@ -718,7 +718,8 @@ rework() {
       (. as $ts | [$ts[] | select(.id as $i | all($ts[]; (try (.deps | fromjson) catch []) | index($i) | not))][0]) as $leaf
       | [$leaf] + ([.[] | select(.id != $leaf.id)] | leaves_first) end;
     [.result.tasks[] | select(.status == "pending" and (.id as $i | $keep | split(" ") | index($i) | not))] | leaves_first | .[].id' \
-    "$tmp/tasks.json" > "$tmp/supersede" || return 1
+    "$tmp/tasks.json" > "$tmp/supersede.raw" || return 1
+  tr -d '\r' < "$tmp/supersede.raw" > "$tmp/supersede" || return 1
   while IFS= read -r s; do
     done_with "$s" "superseded by round 2" || return 1
   done < "$tmp/supersede"

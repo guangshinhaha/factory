@@ -5,7 +5,7 @@
 # starts an agent and scheduling costs no tokens.
 # Usage: sf-tick [owner/repo]   (default: the repo in the current directory, via gh)
 #
-# Lock: a `mkdir` dir, FACTORY_TICK_LOCK (default /tmp/factory-tick-<uid>.lock), shared by every
+# Lock: a dir, FACTORY_TICK_LOCK (default /tmp/factory-tick-<uid>.lock), shared by every
 # repo's tick on the host, so two fires never act at once. sf-tick takes it; sf-act writes its
 # pid into it and removes it on exit, so the lock is held until sf-act is done. Stale, and taken
 # over: its pid is gone; no pid 2 minutes after it was taken (sf-act never started); or older
@@ -42,19 +42,24 @@ stale() {
   [ -n "$(find "$1" -maxdepth 0 -mmin +2 2> /dev/null)" ]
 }
 
-# take: mkdir the lock; a stale one is removed under a second mkdir, rechecked first, so two
+# own <dir>: create the dir and claim it. mkdir alone isn't atomic everywhere (uutils mkdir, on
+# Ubuntu 26.04, lets two concurrent calls on one path both succeed), so the claim is an O_EXCL
+# file inside it, which the shell creates itself: one claimant wins.
+own() { mkdir "$1" 2> /dev/null && (set -C && echo $$ > "$1/tick") 2> /dev/null; }
+
+# take: own the lock; a stale one is removed under a second owned dir, rechecked first, so two
 # ticks never both remove it and both take it.
 take() {
-  mkdir "$lock" 2> /dev/null && return 0
+  own "$lock" && return 0
   stale "$lock" || return 1
-  if [ -n "$(find "$lock.reap" -maxdepth 0 -mmin +2 2> /dev/null)" ]; then rmdir "$lock.reap" 2> /dev/null; fi
-  mkdir "$lock.reap" 2> /dev/null || return 1
+  if [ -n "$(find "$lock.reap" -maxdepth 0 -mmin +2 2> /dev/null)" ]; then rm -rf "$lock.reap"; fi
+  own "$lock.reap" || return 1
   if stale "$lock"; then
     rm -rf "$lock"
     echo "$me: removed a stale lock $lock"
   fi
-  rmdir "$lock.reap"
-  mkdir "$lock" 2> /dev/null
+  rm -rf "$lock.reap"
+  own "$lock"
 }
 
 if ! take; then

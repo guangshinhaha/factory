@@ -118,8 +118,8 @@ test_two_concurrent_ticks_spawn_one_sf_act() {
   wait "$a" || :
   wait "$b" || :
   assert_eq 1 "$(terminals)" "terminals"
-  # The loser either found the lock held or ran after the winner's sf-act and found no work;
-  # which one depends on timing (a fast runner finishes the first tick before the second starts).
+  # The loser finds the lock held: the winner keeps it after the spawn (no sf-act runs here).
+  assert_contains "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out")" "another tick holds"
   assert_eq 1 "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out" | grep -c 'spawned sf-act')" \
     "ticks that spawned sf-act (a: $(cat "$TEST_TMP/a.out"); b: $(cat "$TEST_TMP/b.out"); terminals: $(sim -c '.terminals'))"
 }
@@ -195,4 +195,27 @@ W
   kill "$late"
   assert_contains "$(cat "$TEST_TMP/tick.out")" "another tick holds"
   assert_eq 0 "$(terminals)" "terminals"
+}
+
+# uutils mkdir (Ubuntu 26.04) can report success on a dir that exists: the claim file still
+# keeps a held lock held, and two racing ticks still spawn one sf-act.
+test_a_mkdir_that_succeeds_on_an_existing_dir_takes_no_held_lock() {
+  tick_world
+  real=$(command -v mkdir)
+  printf '#!/bin/sh\nexec "%s" -p "$@"\n' "$real" > "$TEST_TMP/bin/mkdir"
+  chmod +x "$TEST_TMP/bin/mkdir"
+  "$real" "$FACTORY_TICK_LOCK"
+  echo 1 > "$FACTORY_TICK_LOCK/tick"
+  tick
+  assert_contains "$(cat "$TEST_TMP/tick.out")" "another tick holds"
+  assert_eq 0 "$(terminals)" "terminals"
+  rm -rf "$FACTORY_TICK_LOCK"
+  sh "$FACTORY_ROOT/bin/sf-tick" "$REPO" > "$TEST_TMP/a.out" 2>&1 &
+  a=$!
+  sh "$FACTORY_ROOT/bin/sf-tick" "$REPO" > "$TEST_TMP/b.out" 2>&1 &
+  b=$!
+  wait "$a" || :
+  wait "$b" || :
+  assert_eq 1 "$(terminals)" "terminals"
+  assert_eq 1 "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out" | grep -c 'spawned sf-act')" "ticks that spawned sf-act"
 }

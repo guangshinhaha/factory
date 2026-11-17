@@ -369,8 +369,14 @@ test_missing_gantry_gates_stop_before_acting_and_release_the_lock() {
   world
   mkdir "$TEST_TMP/lock" "$TEST_TMP/nogantry"
   for t in sh jq git dirname cat mktemp rm sed; do ln -s "$(command -v "$t")" "$TEST_TMP/nogantry/$t"; done
+  # PATH without the dirs holding a gantry gate, plus the tools above (in case their dir held
+  # one). A bare symlink dir isn't enough on Windows: Git Bash tools need their DLLs on PATH.
+  p=$TEST_TMP/nogantry
+  for d in $(printf '%s\n' "$PATH" | tr ':' ' '); do
+    [ -e "$d/gantry-gate-evidence" ] || [ -e "$d/gantry-verdict-check" ] || p=$p:$d
+  done
   status=0
-  PATH=$TEST_TMP/nogantry "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" 2> "$TEST_TMP/err" || status=$?
+  PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "gantry-gate-evidence not found on PATH"
   [ ! -e "$TEST_TMP/lock" ] || fail "lock kept"
