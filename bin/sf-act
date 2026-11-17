@@ -260,7 +260,8 @@ brief_for() {
       set -- "$@" --branch "$(branch)" --tier "$(rget "$ij" .tier)"
       [ "$st" = build ] && set -- "$@" --work-type "$(rget "$ij" .work_type)"
       if [ "$st" != build ] || [ "$rd" = 2 ]; then
-        pr=$(open_pr "$(branch)") && [ -n "$pr" ] || { log "no open PR on $(branch) for the $st brief"; return 1; }
+        pr=$(open_pr "$(branch)") || pr=''
+    [ -n "$pr" ] || { log "no open PR on $(branch) for the $st brief"; return 1; }
         set -- "$@" --pr "$pr"
       fi
       case "$st" in build | review) set -- "$@" --round "$rd" ;; esac
@@ -713,7 +714,7 @@ while [ $pass -lt 4 ]; do
   pass=$((pass + 1))
   sf-state "$repo" > "$tmp/actions" || { log "sf-state failed; nothing done this pass"; exit 1; }
   todo=$(jq -c '[.[] | select(.action != "hold")]' "$tmp/actions") || exit 1
-  [ "$todo" != '[]' ] && [ "$todo" != "$prev" ] || break
+  if [ "$todo" = '[]' ] || [ "$todo" = "$prev" ]; then break; fi
   prev=$todo
   printf '%s\n' "$todo" | jq -c '.[]' > "$tmp/todo"
   while IFS= read -r a <&3; do

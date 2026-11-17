@@ -118,7 +118,9 @@ test_two_concurrent_ticks_spawn_one_sf_act() {
   wait "$a" || :
   wait "$b" || :
   assert_eq 1 "$(terminals)" "terminals"
-  assert_contains "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out")" "another tick holds"
+  # The loser either found the lock held or ran after the winner's sf-act and found no work;
+  # which one depends on timing (a fast runner finishes the first tick before the second starts).
+  assert_eq 1 "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out" | grep -c 'spawned sf-act')" "ticks that spawned sf-act"
 }
 
 # Done when (#7): two concurrent fires plus a kill mid-Run produce one Run. sf-act is killed

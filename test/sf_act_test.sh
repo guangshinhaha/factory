@@ -192,7 +192,7 @@ test_review_findings_rework_in_round_two_and_a_round_two_fail_stops() {
   # Leaves first: ship is superseded before verify, so verify never turns ready on the way.
   s=$(grep -n "task-update --id $ship --status completed" "$FAKE_LOG" | cut -d: -f1)
   v=$(grep -n "task-update --id $verify --status completed" "$FAKE_LOG" | cut -d: -f1)
-  [ -n "$s" ] && [ -n "$v" ] && [ "$s" -lt "$v" ] || fail "superseded out of order (ship line $s, verify line $v)"
+  if [ -z "$s" ] || [ -z "$v" ] || [ "$s" -ge "$v" ]; then fail "superseded out of order (ship line $s, verify line $v)"; fi
   assert_eq dispatched "$(status_of 'build r2')" "build r2"
   assert_contains "$(spec_of 'build r2')" "- Round: 2 of 2"
   assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
