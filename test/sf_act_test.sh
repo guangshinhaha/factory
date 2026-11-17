@@ -642,3 +642,44 @@ test_factory_sensitive_forces_review_onto_claude_over_any_review_line() {
   to_review
   assert_eq claude/opus "$(agent_of review)" "review agent"
 }
+
+test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run() {
+  world
+  claude_md "$(printf 'factory-sensitive: true')"
+  to_build
+  echo "PASS" | fixture gantry-gate-evidence --force-with-lease
+  open_pr_seq app-7 '' 12
+  fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
+  orca_fails worker-start "claude: not logged in"
+  finish build "$BUILT"
+  act
+  assert_eq ready "$(status_of review)" "review"
+  assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
+}
+
+test_a_review_hold_names_the_provider_the_worker_was_launched_on() {
+  world
+  claude_md "$(printf 'factory-model.intake: codex/gpt')"
+  orca_fails worker-start "codex usage limit reached"
+  act
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " codex "
+}
+
+test_a_malformed_factory_sensitive_line_stops_naming_the_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true # PDPA')"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[factory-sensitive: true # PDPA]"
+  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+}
+
+test_an_override_pushed_to_origin_since_the_last_fetch_applies() {
+  world
+  git_q clone "$TEST_TMP/origin.git" "$TEST_TMP/other"
+  printf 'factory-model.intake: claude/opus\n' > "$TEST_TMP/other/CLAUDE.md"
+  git -C "$TEST_TMP/other" add CLAUDE.md
+  git -C "$TEST_TMP/other" commit -q -m override
+  git -C "$TEST_TMP/other" push -q origin HEAD:main
+  acts
+  assert_eq claude/opus "$(agent_of intake)" "intake agent"
+}

@@ -293,9 +293,12 @@ default_model() {
 # station is asked for. `factory-sensitive: true` keeps review on Claude over any review line.
 model_for() {
   mf=$(default_model "$1")
+  git -C "$main" fetch -q origin 2> "$tmp/err" || { echo "origin not fetched: $(first "$tmp/err")"; return 1; }
   mdef=$(default_ref) || { echo "origin's default branch not known (refs/remotes/origin/HEAD)"; return 1; }
   git -C "$main" show "$mdef:CLAUDE.md" 2> /dev/null | tr -d '\r' > "$tmp/claude.md" || :
   grep '^[[:space:]]*factory-model\.' "$tmp/claude.md" > "$tmp/models" || :
+  grep '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | grep -Ev '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  if [ -s "$tmp/bad" ]; then echo "CLAUDE.md line [$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
   seen=' '
   while IFS= read -r ml; do
     ml=$(printf '%s' "$ml" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -352,10 +355,10 @@ start_worker() {
   fi
   why=$(cat "$tmp/started" "$tmp/err" | tr '\n' ' ' | clip)
   if printf '%s\n' "$why" | grep -Eiq "$LIMIT_RE"; then
-    hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$agent usage limit: $why"
+    hold_task "$t" "$st" "$agent" "$(in_an_hour)" "$agent usage limit: $why"
     return
   fi
-  if [ "$st" = review ]; then
+  if [ "$st" = review ] && [ "$agent" = codex ]; then
     # No Codex access is a skip with a PR comment; anything else a usage limit didn't explain stops.
     if printf '%s\n' "$why" | grep -Eiq 'not installed|codex[^ ]* not found|command not found|not signed in|not logged in|log ?in required|unauthenticated|unauthorized|unknown agent'; then
       pr=$(open_pr "$(branch)")
