@@ -309,10 +309,12 @@ test_target_repo_hooks_do_not_block_setup() {
   world
   hooks=$WS/.git/hooks
   mkdir -p "$hooks"
-  for h in post-checkout pre-commit commit-msg pre-push reference-transaction; do
-    printf '#!/bin/sh\necho "%s: node_modules missing" >&2\nexit 1\n' "$h" > "$hooks/$h"
+  # Each hook records that it ran: git ignores post-index-change's exit status.
+  for h in post-checkout pre-commit commit-msg pre-push reference-transaction post-index-change; do
+    printf '#!/bin/sh\necho %s >> "%s"\necho "%s: node_modules missing" >&2\nexit 1\n' "$h" "$TEST_TMP/hooks-ran" "$h" > "$hooks/$h"
     chmod +x "$hooks/$h"
   done
+  git -C "$WS" config core.fsmonitor "$hooks/post-checkout" # a hook in all but name
   git -C "$TEST_TMP/seed" commit -q --allow-empty -m ahead # the workspace's fetch updates a ref
   git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
   status=0
@@ -320,7 +322,8 @@ test_target_repo_hooks_do_not_block_setup() {
   assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
   assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
-  for h in post-checkout pre-commit commit-msg pre-push reference-transaction; do
+  assert_eq "" "$(cat "$TEST_TMP/hooks-ran" 2> /dev/null)" "hooks run"
+  for h in post-checkout pre-commit commit-msg pre-push reference-transaction post-index-change; do
     [ -x "$hooks/$h" ] || fail "hook $h removed from the workspace"
   done
 }
@@ -350,7 +353,8 @@ test_origin_off_github_exits_2_without_writes() {
   world
   for url in https://gitlab.com/acme/app.git git@gitlab.com:acme/app.git \
     https://evil.example/x@github.com/acme/app.git https://github.com.evil.example/acme/app.git \
-    ssh://git@github.com.evil.example/acme/app.git; do
+    ssh://git@github.com.evil.example/acme/app.git 'https://evil.example?@github.com/acme/app.git' \
+    'https://evil.example#@github.com/acme/app.git' file://github.com/acme/app.git; do
     git -C "$WS" remote set-url origin "$url"
     status=0
     sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?

@@ -72,11 +72,13 @@ while read -r kind url; do
   u=${u%/}
   u=${u%.git}
   case "$u" in
-    *://*) # scheme://[user@]host[:port]/owner/repo
+    https://* | http://* | ssh://* | git://* | git+ssh://* | ssh+git://*)
+      # scheme://[user@]host[:port]/owner/repo; the host part ends at the first / ? or #
       u=${u#*://}
-      host=${u%%/*}
-      path=${u#*/}
+      host=${u%%[/?#]*}
+      path=${u#"$host"}
       ;;
+    *://*) host='' path='' ;; # file:// and other transports never reach github.com
     *:*) # git's scp form [user@]host:owner/repo; a slash before the colon makes it a path
       host=${u%%:*}
       path=${u#*:}
@@ -128,11 +130,13 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 # The repo's hooks need its deps (node_modules and the like), which the temporary worktree lacks,
 # so they would fail every run. The only commit is the factory lines written here, and it lands
-# through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks.
+# through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks, and
+# without core.fsmonitor, a program from the repo's config that runs like one.
 nohooks=$tmp/no-hooks
 mkdir "$nohooks" || die "temp dir not created"
+quiet_git() { git -c core.hooksPath="$nohooks" -c core.fsmonitor=false "$@"; }
 
-git -c core.hooksPath="$nohooks" -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
+quiet_git -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
   || die "origin/$default not fetched in $ws (git fetch failed)"
 
 # Blobs by id, never `git show <ref>:<path>`: Git Bash rewrites that argument as a path list.
@@ -180,7 +184,7 @@ else
     echo "$me: file changes wait on $pr"
   else
     wt=$tmp/wt
-    git -c core.hooksPath="$nohooks" -C "$ws" worktree add -q --detach "$wt" "origin/$default" > /dev/null 2>&1 \
+    quiet_git -C "$ws" worktree add -q --detach "$wt" "origin/$default" > /dev/null 2>&1 \
       || { wt=; die "worktree for $branch not created in $ws (git worktree add failed)"; }
     if [ -s "$tmp/risky.add" ]; then
       mkdir -p "$wt/.github"
@@ -195,15 +199,15 @@ else
         { if [ -s "$tmp/claude" ]; then cat "$tmp/claude" && echo; fi && cat "$tmp/claude.add"; } > "$wt/CLAUDE.md"
       fi
     fi
-    { git -C "$wt" add -A -- .github/gantry-risky-paths CLAUDE.md \
-      && git -c core.hooksPath="$nohooks" -C "$wt" commit -q -m "chore: set up the factory (sf-init)"; } \
+    { quiet_git -C "$wt" add -A -- .github/gantry-risky-paths CLAUDE.md \
+      && quiet_git -C "$wt" commit -q -m "chore: set up the factory (sf-init)"; } \
       || die "factory setup not committed on $branch (git commit failed)"
     # The branch is the factory's own: replace a stale one from a closed PR, but only the copy
     # seen just now, so a concurrent push is not lost.
     old=$(git -C "$ws" ls-remote origin "refs/heads/$branch") \
       || die "remote $branch not read (git ls-remote failed)"
     old=$(printf '%s\n' "$old" | cut -f1)
-    git -c core.hooksPath="$nohooks" -C "$wt" push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" \
+    quiet_git -C "$wt" push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" \
       || die "$branch not pushed to origin (git push failed)"
     printf '%s\n' "sf-init sets this repo up for the factory." "" \
       "- \`.github/gantry-risky-paths\`: lefthook.yml and .github/workflows/** need a human review, so an agent can't quietly weaken a check." \
