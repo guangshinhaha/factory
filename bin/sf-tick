@@ -1,0 +1,92 @@
+#!/bin/sh
+# sf-tick: the factory's foreman, run as the repo automation's precheck from its main checkout.
+# Takes the host-wide lock, runs sf-state, and when there is anything to do spawns sf-act in an
+# Orca terminal (a precheck can't bind a Run). Always exits non-zero, so the automation never
+# starts an agent and scheduling costs no tokens.
+# Usage: sf-tick [owner/repo]   (default: the repo in the current directory, via gh)
+#
+# Lock: a dir, FACTORY_TICK_LOCK (default /tmp/factory-tick-<uid>.lock), shared by every
+# repo's tick on the host, so two fires never act at once. sf-tick takes it; sf-act writes its
+# pid into it and removes it on exit, so the lock is held until sf-act is done. Stale, and taken
+# over: its pid is gone; no pid 2 minutes after it was taken (sf-act never started); or older
+# than 3 hours whatever the pid says.
+#
+# Exit 1 always (2 on bad arguments). The last line of stdout says what happened.
+set -u
+
+me=sf-tick
+root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/factory.sh
+. "$root/lib/factory.sh"
+bindir=$root/bin
+
+[ $# -le 1 ] || usage_error "usage: sf-tick [owner/repo]"
+need_jq
+repo=$(resolve_repo "${1:-}") || exit 2
+printf '%s\n' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || usage_error "repo [$repo] is not owner/repo"
+lock=${FACTORY_TICK_LOCK:-/tmp/factory-tick-$(id -u).lock}
+case "$lock$bindir$(pwd)$PATH" in
+  *"'"*) usage_error "a path or PATH holds a single quote: $lock $bindir $(pwd)" ;;
+esac
+
+# stale <dir>: the lock's holder is gone (see above).
+stale() {
+  [ -d "$1" ] || return 1
+  [ -z "$(find "$1" -maxdepth 0 -mmin +180 2> /dev/null)" ] || return 0
+  if [ -f "$1/pid" ]; then
+    pid=$(cat "$1/pid" 2> /dev/null)
+    is_number "$pid" || return 0
+    kill -0 "$pid" 2> /dev/null && return 1
+    return 0
+  fi
+  [ -n "$(find "$1" -maxdepth 0 -mmin +2 2> /dev/null)" ]
+}
+
+# own <dir>: create the dir and claim it. mkdir alone isn't atomic everywhere (uutils mkdir, on
+# Ubuntu 26.04, lets two concurrent calls on one path both succeed), so the claim is an O_EXCL
+# file inside it, which the shell creates itself: one claimant wins.
+own() { mkdir "$1" 2> /dev/null && (set -C && echo $$ > "$1/tick") 2> /dev/null; }
+
+# take: own the lock; a stale one is removed under a second owned dir, rechecked first, so two
+# ticks never both remove it and both take it.
+take() {
+  own "$lock" && return 0
+  stale "$lock" || return 1
+  if [ -n "$(find "$lock.reap" -maxdepth 0 -mmin +2 2> /dev/null)" ]; then rm -rf "$lock.reap"; fi
+  own "$lock.reap" || return 1
+  if stale "$lock"; then
+    rm -rf "$lock"
+    echo "$me: removed a stale lock $lock"
+  fi
+  rm -rf "$lock.reap"
+  own "$lock"
+}
+
+if ! take; then
+  echo "$me: another tick holds $lock; nothing done"
+  exit 1
+fi
+# release: drop the lock unless an sf-act has claimed it (a late one from a taken-over lock).
+release() { [ -f "$lock/pid" ] || rm -rf "$lock"; }
+
+if ! actions=$(sh "$bindir/sf-state" "$repo"); then
+  release
+  echo "$me: sf-state failed; nothing done"
+  exit 1
+fi
+n=$(printf '%s\n' "$actions" | jq '[.[] | select(.action != "hold")] | length') || n=
+if [ "$n" = 0 ] || [ -z "$n" ]; then
+  release
+  echo "$me: nothing to do for $repo"
+  exit 1
+fi
+
+# The terminal's shell has its own PATH; sf-act gets this one (gantry's gates are on it).
+cmd="PATH='$bindir:$PATH' sh '$bindir/sf-act' --repo '$repo' --lock '$lock'; exit"
+if ! orca terminal create --worktree "path:$(pwd)" --title "sf-act $repo" --command "$cmd" --json > /dev/null; then
+  release
+  echo "$me: sf-act not spawned (orca terminal create failed)"
+  exit 1
+fi
+echo "$me: spawned sf-act for $n action(s) in $repo"
+exit 1

@@ -11,6 +11,8 @@
 #  2. The worktree must be on the PR's branch at the PR's head; a head that moved is refused (stop).
 #  3. `gantry-gate-evidence [--bug]` (`--bug` when the issue is labelled bug), then
 #     `gantry-verdict-check --no-label`: every PR needs a PASS verdict at its head, whatever its labels. Gate exit 1 stops; exit 2 is retried next fire.
+#     Then a review must have run at the head: a trusted PR comment naming the head with `Covered:`
+#     and `Findings:` lines, or `Codex review not run: <reason>`. None: stop.
 #  4. Mode from CLAUDE.md on origin/<base> (never the PR's own copy, which could flip itself to
 #     auto): `shinstack-mode: auto` merges, unless `shinstack-mode.merge: ask`;
 #     `shinstack-mode.merge: auto` merges in any mode. Otherwise: `gh pr ready`, exit 0.
@@ -132,6 +134,19 @@ run_gate gantry-gate-evidence $bug \
 run_gate gantry-verdict-check --pr "$pr" --repo "$repo" --no-label \
   || stop "verdict check failed: $(tr '\n' ' ' < "$tmp/gate")"
 
+# A review must have run at this head: a trusted comment naming the head with a `Covered:` line
+# and a `Findings:` line (the review station's), or sf-act's `Codex review not run: <reason>`.
+# The DAG's order alone isn't proof: a task can be completed by hand.
+gh api "repos/$repo/issues/$pr/comments" --paginate > "$tmp/comments" \
+  || retry "comments of PR #$pr not read (gh api failed)"
+reviewed=$(jq -s --arg head "$head" '
+  if length > 0 and all(.[]; type == "array") then add else error("no JSON array") end
+  | any(.[]; ((.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a))
+      and ((.body // "") | contains($head)
+        and ((test("(^|\n)Covered:") and test("(^|\n)Findings:")) or contains("Codex review not run: "))))' \
+  "$tmp/comments" 2> /dev/null) || retry "comments of PR #$pr not read: gh api printed no JSON array"
+[ "$reviewed" = true ] || stop "no review for PR #$pr head $head: no trusted comment naming the head with Covered: and Findings: lines, or Codex review not run: <reason>"
+
 # --- 4. Mode from the base branch --------------------------------------------------------------
 git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
 claude_md=$(git show "origin/$base:CLAUDE.md" 2> /dev/null) || claude_md=
@@ -169,7 +184,8 @@ wait_mergeable() {
     : > "$tmp/checks.err"
     gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
     if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
-      if grep -q 'no required checks reported' "$tmp/checks.err"; then
+      # A repo with no CI at all says `no checks reported`: no required check gates it either.
+      if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
         echo '[]' > "$tmp/checks"
       else
         retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
