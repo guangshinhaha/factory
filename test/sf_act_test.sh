@@ -368,7 +368,7 @@ test_sf_state_failing_does_nothing() {
 test_missing_gantry_gates_stop_before_acting_and_release_the_lock() {
   world
   mkdir "$TEST_TMP/lock" "$TEST_TMP/nogantry"
-  for t in sh jq git dirname cat mktemp rm sed; do ln -s "$(command -v "$t")" "$TEST_TMP/nogantry/$t"; done
+  for t in sh jq git dirname cat mktemp rm sed date; do ln -s "$(command -v "$t")" "$TEST_TMP/nogantry/$t"; done
   # PATH without the dirs holding a gantry gate, plus the tools above (in case their dir held
   # one). A bare symlink dir isn't enough on Windows: Git Bash tools need their DLLs on PATH.
   p=$TEST_TMP/nogantry
@@ -379,6 +379,8 @@ test_missing_gantry_gates_stop_before_acting_and_release_the_lock() {
   PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "gantry-gate-evidence not found on PATH"
+  # The reason is where a person looks, not only on the terminal that closes.
+  assert_contains "$(cat "$FACTORY_ACT_LOG")" "sf-act acme/app: gantry-gate-evidence not found on PATH"
   [ ! -e "$TEST_TMP/lock" ] || fail "lock kept"
   assert_eq 0 "$(count_calls 'gh ')" "gh calls"
 }
@@ -890,4 +892,20 @@ test_a_round_two_body_only_finding_does_not_stop_the_run() {
   assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
   assert_contains "$(sim '[.tasks[] | select(.title == "review r2")][0].result')" '"status":"body-fixed"'
   assert_eq dispatched "$(status_of 'verify r2')" "verify r2"
+}
+
+test_a_failed_run_leaves_its_reason_where_a_person_looks() {
+  world
+  fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body < /dev/null
+  fixture_exit 1 "HTTP 502"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_contains "$(cat "$FACTORY_ACT_LOG")" "sf-act acme/app: sf-state failed"
+}
+
+test_a_clean_run_removes_an_old_failure_line() {
+  world
+  echo "stale" > "$FACTORY_ACT_LOG"
+  acts
+  [ ! -e "$FACTORY_ACT_LOG" ] || fail "failure line kept after a clean run"
 }

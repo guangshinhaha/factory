@@ -36,6 +36,10 @@
 # A stop or abandon closes the Run's terminals first (a stop keeps the worktree for triage); a
 # closed issue whose Run is over gets `cleanup`: its worktree and branch removed, never a dirty one.
 #
+# A failure leaves one line, `<time> sf-act <repo>: <reason>`, in the file `act_log` names
+# (/tmp/factory-act-<uid>-<owner>-<repo>.log): the terminal closes on exit, so stderr is lost.
+# A run that ends clean removes the file. sf-tick reports a recent line.
+#
 # Exit 0: every action done. 1: an action failed (the next fire retries). 2: bad arguments.
 set -u
 
@@ -50,6 +54,19 @@ case ":$PATH:" in
 esac
 
 SHINSTACK_REPO=guangshinhaha/shinstack
+
+# trace <reason>: leave the reason where a person looks (see above). Needs the repo, so a failure
+# before it is known goes unrecorded.
+trace() {
+  [ -n "${repo:-}" ] || return 0
+  printf '%s %s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2> /dev/null)" "$me" "$repo" "$1" > "$(act_log "$repo")" 2> /dev/null || :
+}
+# die, with a trace of its message.
+die() {
+  trace "$*"
+  echo "$me: $*" >&2
+  exit 1
+}
 
 repo='' lock=''
 while [ $# -gt 0 ]; do
@@ -869,7 +886,7 @@ prev=''
 pass=0
 while [ $pass -lt 4 ]; do
   pass=$((pass + 1))
-  sf-state "$repo" > "$tmp/actions" || { log "sf-state failed; nothing done this pass"; exit 1; }
+  sf-state "$repo" > "$tmp/actions" || { trace "sf-state failed"; log "sf-state failed; nothing done this pass"; exit 1; }
   todo=$(jq -c '[.[] | select(.action != "hold")]' "$tmp/actions") || exit 1
   if [ "$todo" = '[]' ] || [ "$todo" = "$prev" ]; then break; fi
   prev=$todo
@@ -889,7 +906,8 @@ while [ $pass -lt 4 ]; do
       stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
       *) log "unknown action: $a"; arc=1 ;;
     esac
-    [ $arc -eq 0 ] || { log "action failed: $a"; exit_status=1; }
+    [ $arc -eq 0 ] || { trace "action failed: $a"; log "action failed: $a"; exit_status=1; }
   done 3< "$tmp/todo"
 done
+[ "$exit_status" -ne 0 ] || rm -f "$(act_log "$repo")"
 exit "$exit_status"

@@ -29,6 +29,12 @@ resolve_repo() {
   esac
 }
 
+# act_log <owner/repo>: the path of the file where sf-act leaves why it last failed (one line,
+# replaced by each failure, removed by a clean run). sf-tick reads it. FACTORY_ACT_LOG overrides.
+act_log() {
+  printf '%s\n' "${FACTORY_ACT_LOG:-/tmp/factory-act-$(id -u)-${1%%/*}-${1#*/}.log}"
+}
+
 is_number() {
   case "${1:-}" in
     '' | *[!0-9]*) return 1 ;;

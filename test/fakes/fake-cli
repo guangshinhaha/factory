@@ -8,7 +8,8 @@
 #   <key>.err   printed to stderr (optional)
 #   <key>.exit  exit status (optional, default 0)
 # <key> is the args joined by "_", with every byte outside [A-Za-z0-9._-]
-# turned into "_". Run `fake-cli --key <args...>` to print a key. Keys can
+# turned into "_"; a key over 200 bytes is cut to 150 and ends in the cksum of the whole, so a
+# long PATH in an arg still fits a file name. Run `fake-cli --key <args...>` to print a key. Keys can
 # collide ("a b" and "a_b"), so pair a replay with assert_called when it matters.
 # A call with no fixture fails with status 97 and names the file it looked for.
 #
@@ -17,10 +18,17 @@
 # Stdin: when an arg is "-" (gh's --body-file -), stdin is appended to $FAKE_LOG.stdin.
 set -u
 
+mkkey() {
+  k=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+  if [ "${#k}" -gt 200 ]; then
+    k=$(printf '%s' "$k" | cut -c1-150)-$(printf '%s' "$*" | cksum | cut -d' ' -f1)
+  fi
+  printf '%s\n' "$k"
+}
+
 if [ "${1:-}" = --key ]; then
   shift
-  printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'
-  echo
+  mkkey "$@"
   exit 0
 fi
 
@@ -38,7 +46,7 @@ for arg in "$@"; do
   fi
 done
 
-key=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+key=$(mkkey "$@")
 base="${FAKE_FIXTURES:-}/$tool/$key"
 
 if [ -n "${FAKE_FIXTURES:-}" ] && [ -f "$base.1.out" ]; then

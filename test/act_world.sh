@@ -35,7 +35,8 @@ world() {
   ORCA_SIM=$TEST_TMP/orca
   SHINSTACK_ROOT=$TEST_TMP/shinstack
   GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
-  export FAKE_FIXTURES ORCA_SIM SHINSTACK_ROOT GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+  FACTORY_ACT_LOG=$TEST_TMP/act.log
+  export FACTORY_ACT_LOG FAKE_FIXTURES ORCA_SIM SHINSTACK_ROOT GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   mkdir -p "$FAKE_FIXTURES" "$ORCA_SIM/fail" "$ORCA_SIM/terminal" "$TEST_TMP/bin" "$SHINSTACK_ROOT/playbooks"
   for p in feature bug-fix refactoring opening-a-pr ship plan; do echo "# $p" > "$SHINSTACK_ROOT/playbooks/$p.md"; done
   printf '#!/bin/sh\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
