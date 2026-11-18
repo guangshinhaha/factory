@@ -21,6 +21,8 @@
 #              the PR branch, so the verdict stands) + inline `lessons`; rebased -> new review,
 #              verify and ship
 #   lessons    pushes debrief's notes as a docs PR, files general lessons as shinstack friction
+# A review whose findings all need only PR body text reports `body_only` + `body_append`: sf-act
+# appends the text to the PR body and carries on, in any round (#53).
 # Round 2 tasks (after review findings or a verify FAIL in round 1) carry the suffix ` r2`.
 # Every inline step creates its children with deps on itself and checks for them first, so a
 # step that dies midway is redone without doubling anything. sf-act binds the Run (`run-use`)
@@ -414,10 +416,10 @@ need_result() {
   [ -n "$rj" ] || { echo "$2 result has no parseable factory-result line"; return 1; }
   [ "$(rget "$rj" .station)" = "$2" ] || { echo "$2 result names station [$(rget "$rj" .station)]"; return 1; }
   rs=$(rget "$rj" .status)
-  # `reworked` and `not-run` are sf-act's own completions (plain text); a worker report claiming
+  # `reworked`, `not-run` and `body-fixed` are sf-act's own completions (plain text); a worker report claiming
   # either is refused.
   case "$rs" in
-    reworked | not-run)
+    reworked | not-run | body-fixed)
       if tfield "$1" result | jq -e '.body' > /dev/null 2>&1; then echo "$2 worker reported sf-act's own status [$rs]"; return 1; fi
       printf '%s\n' "$rj"
       return 0
@@ -805,6 +807,10 @@ act_stop() {
       fi
       ;;
     findings | FAIL)
+      if [ "$st" = review ] && [ -n "$(rget "$rj" .body_append)" ] && [ "$(rget "$rj" .body_only)" = true ]; then
+        body_fix "$run" "$t" "$rj"
+        return
+      fi
       if [ "$(round_of "$title")" = 2 ]; then
         stop_now "$title: $status in round 2 ($(rget "$rj" .comment_url))" >&2
         return
@@ -813,6 +819,27 @@ act_stop() {
       ;;
     *) stop_now "$title failed with status [$status]" >&2 ;;
   esac
+}
+
+# body_fix <run> <review task> <its result>: every finding needs only PR body text (#53). The
+# review station is read-only, so sf-act appends its `body_append` to the PR body (once: a crash
+# before the task completes finds the text already there) and completes the review without a
+# round: the next station sees the fixed body at the same head.
+body_fix() {
+  bind "$1" || return 1
+  bf_pr=$(open_pr "$(branch)") || { log "open PRs for $(branch) not listed"; return 1; }
+  [ -n "$bf_pr" ] || { give_up "$2" review "no open PR on $(branch) for the body fix"; return 1; }
+  bf_add=$(rget "$3" .body_append)
+  bf_body=$(gh pr view "$bf_pr" -R "$repo" --json body -q .body) || { log "body of PR $bf_pr not read"; return 1; }
+  case "$bf_body" in
+    *"$bf_add"*) ;;
+    *)
+      printf '%s\n\n%s\n' "$bf_body" "$bf_add" | gh pr edit "$bf_pr" -R "$repo" --body-file - > /dev/null 2> "$tmp/err" \
+        || { log "body of PR $bf_pr not edited: $(first "$tmp/err")"; return 1; }
+      log "#$issue: appended the review's body fix to PR $bf_pr"
+      ;;
+  esac
+  done_with "$2" "factory-result: {\"station\":\"review\",\"status\":\"body-fixed\",\"was\":$3}"
 }
 
 # rework <run> <failed task> <its result>: round 2. New build r2 + gate r2 first (deps on the
