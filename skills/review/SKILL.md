@@ -45,5 +45,6 @@ Success status: `clean`. Everything else reports `--outcome failed`.
 
 - `clean`: `{"station":"review","status":"clean","head_sha":"<sha>","comment_url":"<url>","notes":2}`
 - `findings`: `{"station":"review","status":"findings","head_sha":"<sha>","comment_url":"<url>","findings":3}`
+- `findings`, every one fixable by PR body text alone (a missing mapping or evidence section, a stale head label): add `"body_only":true,"body_append":"<markdown the factory appends to the PR body>"`. The factory appends it and carries on without a fix round. Any finding that needs code or a test is not body-only: leave both fields out.
 - `hold`: `{"station":"review","status":"hold","provider":"codex","reset":"2026-11-15T10:00:00Z","reason":"Codex usage limit"}`
 - `stop`: `{"station":"review","status":"stop","reason":"head moved: PR is at <sha>, worktree at <sha>"}`

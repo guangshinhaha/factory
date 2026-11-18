@@ -853,3 +853,36 @@ test_unpushed_commits_survive_a_cleanup_because_orca_keeps_an_unmerged_branch() 
   [ ! -d "$w" ] || fail "clean worktree not removed"
   git -C "$TEST_TMP/app" show-ref --verify -q refs/heads/app-7 || fail "branch with unmerged commits was deleted"
 }
+
+test_a_body_only_review_finding_appends_to_the_pr_body_and_the_run_continues_even_in_round_two() {
+  world
+  to_review
+  verify=$(id_of verify)
+  printf 'Closes #7\n' | fixture gh pr view 12 -R "$REPO" --json body -q .body
+  fixture gh pr edit 12 -R "$REPO" --body-file - < /dev/null
+  body_only='factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":1,"body_only":true,"body_append":"## Verification\nscripts/check: ok"}'
+  finish review "$body_only" failed
+  acts
+  assert_contains "$(fake_stdin)" 'scripts/check: ok'
+  assert_contains "$(sim '[.tasks[] | select(.title == "review")][0].result')" '"status":"body-fixed"'
+  assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
+  assert_eq 0 "$(count_titled 'build r2')" "build r2 tasks"
+  assert_eq dispatched "$(sim --arg v "$verify" '.tasks[] | select(.id == $v) | .status')" "verify"
+}
+
+test_a_round_two_body_only_finding_does_not_stop_the_run() {
+  world
+  to_review
+  printf 'Closes #7\n' | fixture gh pr view 12 -R "$REPO" --json body -q .body
+  fixture gh pr edit 12 -R "$REPO" --body-file - < /dev/null
+  finish review 'factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":1}' failed
+  acts
+  echo "PASS" | fixture gantry-gate-evidence --force-with-lease
+  finish 'build r2' "$BUILT"
+  acts
+  finish 'review r2' 'factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":1,"body_only":true,"body_append":"## Mapping\nm"}' failed
+  acts
+  assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
+  assert_contains "$(sim '[.tasks[] | select(.title == "review r2")][0].result')" '"status":"body-fixed"'
+  assert_eq dispatched "$(status_of 'verify r2')" "verify r2"
+}
