@@ -322,7 +322,8 @@ model_for() {
   LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 2; }
   # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
   LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
-  LC_ALL=C grep -a '^[[:space:]]*factory-sensitive:' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  # Same for factory-sensitive: a near-miss would leave review on Codex for a sensitive repo.
+  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?sensitive' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
   if [ -s "$tmp/bad" ]; then printf '%s\n' "CLAUDE.md line [$(LC_ALL=C sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
   seen=' '
   while IFS= read -r ml; do
