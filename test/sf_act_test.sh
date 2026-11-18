@@ -673,6 +673,11 @@ test_a_malformed_factory_sensitive_line_stops_naming_the_line() {
   assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
 }
 
+test_a_bulleted_factory_sensitive_line_stops() { bad_model_line '- factory-sensitive: true'; }
+test_a_factory_sensitive_line_in_another_case_stops() { bad_model_line 'Factory-Sensitive: true'; }
+test_a_factory_sensitive_line_with_odd_spacing_stops() { bad_model_line 'factory-sensitive : true'; }
+test_a_factory_sensitive_line_with_an_underscore_stops() { bad_model_line 'factory_sensitive: true'; }
+
 test_an_override_pushed_to_origin_since_the_last_fetch_applies() {
   world
   git_q clone "$TEST_TMP/origin.git" "$TEST_TMP/other"
