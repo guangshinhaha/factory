@@ -1,0 +1,143 @@
+#!/bin/sh
+# Runs test files: every test_* function in each file, each in its own subshell.
+# Usage: test/run [file...]   (default: test/*_test.sh)
+#
+# Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
+# $FACTORY_FAKES (default test/fakes). The guard dir holds gh, orca and gantry-* gate shims
+# that log and exit 99, so a call that finds no fake never reaches the real
+# CLI, and any guard hit fails the test even if the test ignored the error.
+set -u
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+fakes=${FACTORY_FAKES:-$root/test/fakes}
+
+if [ $# -eq 0 ]; then
+  set -- "$root"/test/*_test.sh
+fi
+
+
+# write_guard <dir> <tool> <log>
+write_guard() {
+  cat > "$1/$2" <<GUARD
+#!/bin/sh
+printf '%s\n' "$2 \$*" >> "$3"
+echo "guard: real $2 reached (no fake $2 on PATH): $2 \$*" >&2
+exit 99
+GUARD
+  chmod +x "$1/$2"
+}
+
+# run_tests <file>: runs one file's tests serially, adding to p (passed) and f (failed).
+run_tests() {
+  file=$1
+  if [ ! -f "$file" ]; then
+    echo "FAIL $file: test file not found"
+    f=$((f + 1))
+    return 0
+  fi
+  path=$(cd "$(dirname "$file")" && pwd)/$(basename "$file")
+  name=${path#"$root"/}
+  fns=$(sed -n 's/^\(test_[A-Za-z0-9_]*\)[[:space:]]*().*/\1/p' "$path")
+  if [ -z "$fns" ]; then
+    echo "FAIL $name: no test_* functions in file"
+    f=$((f + 1))
+    return 0
+  fi
+  for fn in $fns; do
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || return 1
+    mkdir "$tmp/guard" "$tmp/work"
+    write_guard "$tmp/guard" gh "$tmp/guard.log"
+    write_guard "$tmp/guard" orca "$tmp/guard.log"
+    write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
+    write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
+    : > "$tmp/calls.log"
+    (
+      FACTORY_ROOT=$root
+      FAKE_LOG=$tmp/calls.log
+      FAKE_FIXTURES=
+      TEST_TMP=$tmp/work
+      PATH=$fakes:$tmp/guard:$PATH
+      # Even a real gh that slipped past the guard would have no credentials.
+      # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
+      GH_CONFIG_DIR=$tmp/work/gh-config
+      HOME=$tmp/work/home
+      mkdir "$HOME"
+      unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+      # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
+      unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+      export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
+      # shellcheck source=test/lib.sh
+      . "$root/test/lib.sh"
+      # shellcheck disable=SC1090
+      . "$path"
+      set -e
+      "$fn"
+    ) > "$tmp/out" 2>&1
+    status=$?
+    if [ -s "$tmp/guard.log" ]; then
+      echo "guard: test reached a real CLI: $(tr '\n' ';' < "$tmp/guard.log")" >> "$tmp/out"
+      status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+      p=$((p + 1))
+      echo "ok   $name $fn"
+    else
+      f=$((f + 1))
+      echo "FAIL $name $fn"
+      sed 's/^/     /' "$tmp/out"
+    fi
+    rm -rf "$tmp"
+  done
+}
+
+# run_file <file> <result-prefix>: report to <prefix>.out, counts to <prefix>.counts ("passed failed").
+run_file() {
+  p=0
+  f=0
+  run_tests "$1" > "$2.out" 2>&1 || f=$((f + 1))
+  echo "$p $f" > "$2.counts"
+}
+
+# Jobs: TEST_JOBS, else the CPU count. Files run in parallel, each file's tests serially.
+jobs=${TEST_JOBS:-$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo "${NUMBER_OF_PROCESSORS:-2}")}
+case "$jobs" in '' | *[!0-9]* | 0) jobs=2 ;; esac
+
+results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
+trap 'rm -rf "$results"' EXIT
+
+# Start files in argument order, at most $jobs at once: when the window is
+# full, wait for the oldest. Output is merged in argument order, so it is stable.
+n=0
+count=0
+running=""
+for file in "$@"; do
+  n=$((n + 1))
+  run_file "$file" "$results/$n" &
+  running="$running $!"
+  count=$((count + 1))
+  if [ "$count" -ge "$jobs" ]; then
+    oldest=${running# }
+    oldest=${oldest%% *}
+    wait "$oldest" || true
+    running=${running# "$oldest"}
+    count=$((count - 1))
+  fi
+done
+# shellcheck disable=SC2086
+for pid in $running; do wait "$pid" || true; done
+
+passed=0
+failed=0
+i=1
+while [ "$i" -le "$n" ]; do
+  cat "$results/$i.out"
+  p=0
+  f=1
+  read -r p f < "$results/$i.counts" || echo "FAIL file $i: no result recorded"
+  passed=$((passed + p))
+  failed=$((failed + f))
+  i=$((i + 1))
+done
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]
