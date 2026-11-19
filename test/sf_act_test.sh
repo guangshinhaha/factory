@@ -489,7 +489,7 @@ test_a_task_list_with_a_second_document_is_not_trusted() {
   printf '#!/bin/sh\ncase " $* " in *" task-list "*" --full "*) echo '"'"'{"ok":false}'"'"' ;; esac\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
   act
   assert_eq 1 "$act_status" "sf-act exit status"
-  assert_contains "$(cat "$FACTORY_ACT_LOG")" "not listed: task-list printed no task array"
+  assert_contains "$(cat "$TEST_TMP/err")" "not listed: task-list printed no task array"
 }
 
 # Seen in the e2e: a worker ends its body's only line with the result instead of a line of its own.
