@@ -1,5 +1,6 @@
 #!/bin/sh
-# Runs test files: every test_* function in each file, each in its own subshell.
+# Runs test files: every test_* function in each file, each in its own subshell,
+# in parallel across test functions; each result prints as soon as its test finishes.
 # Usage: test/run [file...]   (default: test/*_test.sh)
 #
 # Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
@@ -15,8 +16,6 @@ if [ $# -eq 0 ]; then
   set -- "$root"/test/*_test.sh
 fi
 
-passed=0
-failed=0
 
 # write_guard <dir> <tool> <log>
 write_guard() {
@@ -29,6 +28,76 @@ GUARD
   chmod +x "$1/$2"
 }
 
+# run_unit <id> <path> <name> <fn>: one test function in its own temp dir and subshell.
+# Writes the report to $results/<id>.out and the verdict (0 pass, 1 fail) to
+# $results/<id>.status, then creates $results/<id>.done last, so a reader that sees .done sees both.
+run_unit() {
+  uid=$1 path=$2 name=$3 fn=$4
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || {
+    echo "FAIL $name $fn: temp dir not created" > "$results/$uid.out"
+    echo 1 > "$results/$uid.status"
+    : > "$results/$uid.done"
+    return 0
+  }
+  mkdir "$tmp/guard" "$tmp/work"
+  write_guard "$tmp/guard" gh "$tmp/guard.log"
+  write_guard "$tmp/guard" orca "$tmp/guard.log"
+  write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
+  write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
+  : > "$tmp/calls.log"
+  (
+    FACTORY_ROOT=$root
+    FAKE_LOG=$tmp/calls.log
+    FAKE_FIXTURES=
+    TEST_TMP=$tmp/work
+    PATH=$fakes:$tmp/guard:$PATH
+    # Even a real gh that slipped past the guard would have no credentials.
+    # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
+    GH_CONFIG_DIR=$tmp/work/gh-config
+    HOME=$tmp/work/home
+    mkdir "$HOME"
+    unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+    # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
+    # shellcheck source=test/lib.sh
+    . "$root/test/lib.sh"
+    # shellcheck disable=SC1090
+    . "$path"
+    set -e
+    "$fn"
+  ) > "$tmp/out" 2>&1
+  status=$?
+  if [ -s "$tmp/guard.log" ]; then
+    echo "guard: test reached a real CLI: $(tr '\n' ';' < "$tmp/guard.log")" >> "$tmp/out"
+    status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    echo "ok   $name $fn" > "$results/$uid.out"
+    echo 0 > "$results/$uid.status"
+  else
+    {
+      echo "FAIL $name $fn"
+      sed 's/^/     /' "$tmp/out"
+    } > "$results/$uid.out"
+    echo 1 > "$results/$uid.status"
+  fi
+  rm -rf "$tmp"
+  : > "$results/$uid.done"
+}
+
+# Jobs: TEST_JOBS, else the CPU count. Every test function is a unit; at most $jobs run at once.
+jobs=${TEST_JOBS:-$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo "${NUMBER_OF_PROCESSORS:-2}")}
+case "$jobs" in '' | *[!0-9]* | 0) jobs=2 ;; esac
+
+results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
+trap 'rm -rf "$results"' EXIT
+
+passed=0
+failed=0
+
+# List units as "<path> <name> <fn>" lines in $results/units. A file that is missing
+# or has no tests fails at once, so it can never pass by running nothing.
 for file in "$@"; do
   if [ ! -f "$file" ]; then
     echo "FAIL $file: test file not found"
@@ -44,51 +113,48 @@ for file in "$@"; do
     continue
   fi
   for fn in $fns; do
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || exit 1
-    mkdir "$tmp/guard" "$tmp/work"
-    write_guard "$tmp/guard" gh "$tmp/guard.log"
-    write_guard "$tmp/guard" orca "$tmp/guard.log"
-    write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
-    write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
-    : > "$tmp/calls.log"
-    (
-      FACTORY_ROOT=$root
-      FAKE_LOG=$tmp/calls.log
-      FAKE_FIXTURES=
-      TEST_TMP=$tmp/work
-      PATH=$fakes:$tmp/guard:$PATH
-      # Even a real gh that slipped past the guard would have no credentials.
-      # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
-      GH_CONFIG_DIR=$tmp/work/gh-config
-      HOME=$tmp/work/home
-      mkdir "$HOME"
-      unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
-      # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
-      unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
-      export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
-      # shellcheck source=test/lib.sh
-      . "$root/test/lib.sh"
-      # shellcheck disable=SC1090
-      . "$path"
-      set -e
-      "$fn"
-    ) > "$tmp/out" 2>&1
-    status=$?
-    if [ -s "$tmp/guard.log" ]; then
-      echo "guard: test reached a real CLI: $(tr '\n' ';' < "$tmp/guard.log")" >> "$tmp/out"
-      status=1
-    fi
-    if [ "$status" -eq 0 ]; then
-      passed=$((passed + 1))
-      echo "ok   $name $fn"
-    else
-      failed=$((failed + 1))
-      echo "FAIL $name $fn"
-      sed 's/^/     /' "$tmp/out"
-    fi
-    rm -rf "$tmp"
+    echo "$path $name $fn" >> "$results/units"
   done
 done
+
+total=0
+[ -f "$results/units" ] && total=$(wc -l < "$results/units" | tr -d ' ')
+
+# Start units in order while fewer than $jobs run; print each unit's report the moment it
+# finishes (completion order), so a timeout still shows progress.
+next=1
+pending=""
+active=0
+printed=0
+while [ "$printed" -lt "$total" ]; do
+  while [ "$next" -le "$total" ] && [ "$active" -lt "$jobs" ]; do
+    read -r path name fn << UNIT
+$(sed -n "${next}p" "$results/units")
+UNIT
+    run_unit "$next" "$path" "$name" "$fn" &
+    pending="$pending $next"
+    active=$((active + 1))
+    next=$((next + 1))
+  done
+  progress=0
+  still=""
+  for i in $pending; do
+    if [ -f "$results/$i.done" ]; then
+      cat "$results/$i.out"
+      s=1
+      read -r s < "$results/$i.status" || s=1
+      if [ "$s" = 0 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+      printed=$((printed + 1))
+      active=$((active - 1))
+      progress=1
+    else
+      still="$still $i"
+    fi
+  done
+  pending=$still
+  [ "$progress" -eq 1 ] || sleep 0.2
+done
+wait
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
