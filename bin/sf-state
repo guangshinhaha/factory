@@ -2,6 +2,8 @@
 # sf-state: print what the factory should do next, as a JSON array, from GitHub and Orca alone.
 # Usage: sf-state [owner/repo]   (default: the repo in the current directory, via gh)
 # Run from the repo's checkout: `factory-concurrency: N` is read from ./CLAUDE.md (default 2).
+# `factory-release-path: #N` in ./CLAUDE.md, while issue N is open: only ready issues listed in N's body
+# start, in list order (still honouring `Depends on`); other ready issues are left alone.
 # FACTORY_MAX_RUNS caps live `factory */*#*` Runs host-wide (default 4).
 #
 # Actions, one object each, sorted by issue:
@@ -63,6 +65,13 @@ concurrency=$FACTORY_CONCURRENCY_DEFAULT
 if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-concurrency:' CLAUDE.md; then
   concurrency=$(sed -n 's/^[[:space:]]*factory-concurrency:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
   [ -n "$concurrency" ] || die "factory-concurrency in CLAUDE.md is not a whole number"
+fi
+
+# `factory-release-path: #N` names an issue whose body lists, in order, the only ready issues to start.
+release_path=null
+if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-release-path:' CLAUDE.md; then
+  release_path=$(sed -n 's/^[[:space:]]*factory-release-path:[[:space:]]*#\([0-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
+  [ -n "$release_path" ] || die "factory-release-path in CLAUDE.md is not an issue reference like #72"
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-state.XXXXXX") || die "temp dir not created"
@@ -189,6 +198,7 @@ jq -n -c \
   --arg repo "$repo" \
   --argjson concurrency "$concurrency" \
   --argjson max_runs "$max_runs" \
+  --argjson release_path "$release_path" \
   --slurpfile issues "$tmp/issues.json" \
   --slurpfile prs "$tmp/prs.json" \
   --slurpfile timelines "$tmp/timelines.jsonl" \
@@ -371,8 +381,15 @@ def run_state:
   # A restart revives a Run, so it takes a slot a start would otherwise get.
   | ([$run_actions[] | select(.action == "restart") | .run] | unique | length) as $restarting
   | ([$capacity - $restarting, 0] | max) as $capacity
-  # Oldest ready label first, then lowest issue number.
-  | ($cands | map(select(.ready and .run == null)) | sort_by(.since, .n)) as $idle
+  # Oldest ready label first, then lowest issue number. With a release path (an open issue naming
+  # the ones to run), only the issues it lists start, in the order it lists them: an off-list
+  # ready issue is left alone, with no hold or stop. A closed path issue is no path.
+  | (if $release_path == null then null
+     else ([$issues[0][] | select(.number == $release_path)] | first | if . == null then null else [.body // "" | refs] | .[0] | reduce .[] as $x ([]; if index($x) then . else . + [$x] end) end)
+     end) as $path
+  | ($cands | map(select(.ready and .run == null))
+     | if $path == null then sort_by(.since, .n)
+       else map(. as $c | select($path | index($c.n)) | . + {pos: ($path | index($c.n))}) | sort_by(.pos) end) as $idle
   | ([$idle[] | select(.attempts >= 3) | {action: "stop", issue: .n, reason: "\(.attempts) attempts since it was last labelled ready"}]) as $stops
   | ([$idle[] | select(.attempts < 3 and (.deps | length) > 0) | {action: "hold", issue: .n, reason: "depends on open \(.deps | map("#\(.)") | join(", "))"}]) as $holds
   | ([$idle[] | select(.attempts < 3 and (.deps | length) == 0)] | .[0:$capacity] | map({action: "start", issue: .n})) as $starts
