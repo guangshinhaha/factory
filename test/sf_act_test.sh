@@ -998,3 +998,91 @@ test_a_clean_run_removes_an_old_failure_line() {
   acts
   [ ! -e "$FACTORY_ACT_LOG" ] || fail "failure line kept after a clean run"
 }
+
+# ---- stage timestamps (#63) ------------------------------------------------------------------------
+
+# clock <UTC ISO time>: sf-act's `date -u +%Y-%m-%dT%H:%M:%SZ` reads this time; other date calls are real.
+clock() {
+  printf '%s\n' "$1" > "$TEST_TMP/now"
+  cat > "$TEST_TMP/bin/date" <<DATE
+#!/bin/sh
+case "\$*" in
+  '-u +%Y-%m-%dT%H:%M:%SZ') cat "$TEST_TMP/now" ;;
+  *) exec /bin/date "\$@" ;;
+esac
+DATE
+  chmod +x "$TEST_TMP/bin/date"
+}
+stage_marker() { printf '<!-- factory:{"kind":"stage","stage":"%s","at":"%s"} -->' "$1" "$2"; }
+
+test_the_build_evidence_review_and_verify_stages_are_stamped_when_they_begin() {
+  world
+  clock 2026-11-19T01:00:00Z
+  to_build
+  assert_contains "$(fake_stdin)" "$(stage_marker build 2026-11-19T01:00:00Z)"
+  assert_contains "$(fake_stdin)" "factory: stage build began at 2026-11-19T01:00:00Z."
+  clock 2026-11-19T01:14:02Z
+  echo "PASS: pushed app-7" | fixture gantry-gate-evidence --force-with-lease
+  open_pr_seq app-7 '' 12
+  fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
+  finish build "$BUILT"
+  acts
+  assert_contains "$(fake_stdin)" "$(stage_marker evidence 2026-11-19T01:14:02Z)"
+  assert_contains "$(fake_stdin)" "$(stage_marker review 2026-11-19T01:14:02Z)"
+  clock 2026-11-19T01:20:30Z
+  finish review "$CLEAN"
+  acts
+  assert_contains "$(fake_stdin)" "$(stage_marker verify 2026-11-19T01:20:30Z)"
+}
+
+test_a_stage_already_stamped_since_ready_is_not_stamped_again() {
+  world
+  clock 2026-11-19T01:00:00Z
+  timeline "[$READY_EVENT,$(marker_comment '{"kind":"stage","stage":"build","at":"2026-11-18T23:00:00Z"}' 2026-11-18T23:00:00Z)]"
+  to_build
+  case "$(fake_stdin)" in
+    *'"stage":"build"'*) fail "build stamped twice: $(fake_stdin)" ;;
+  esac
+}
+
+test_the_ship_and_merge_stages_are_stamped_and_lessons_prints_every_wait() {
+  world
+  clock 2026-11-19T01:00:00Z
+  to_ship
+  clock 2026-11-19T01:40:00Z
+  echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  acts
+  assert_contains "$(fake_stdin)" "$(stage_marker ship 2026-11-19T01:40:00Z)"
+  assert_contains "$(fake_stdin)" "$(stage_marker merge 2026-11-19T01:40:00Z)"
+  # The merge closed the issue; lessons posts the timeline from the stamps on the issue.
+  issues '[]'
+  prs '[]'
+  timeline "[$READY_EVENT,$(marker_comment "$(jq -cn '{kind:"stage",stage:"merge",at:"2026-11-19T01:40:00Z"}')" 2026-11-19T01:40:00Z),$(marker_comment "$(jq -cn '{kind:"stage",stage:"build",at:"2026-11-19T01:00:00Z"}')" 2026-11-19T01:00:00Z),$(marker_comment "$(jq -cn '{kind:"stage",stage:"evidence",at:"2026-11-19T01:14:02Z"}')" 2026-11-19T01:14:02Z),$(marker_comment "$(jq -cn '{kind:"stage",stage:"ship",at:"2026-11-19T01:40:00Z"}')" 2026-11-19T01:40:00Z)]"
+  echo "PASS" | fixture gantry-gate-evidence
+  fixture gh pr create -R "$REPO" --head debrief-app-7 --base main --title "docs: debrief notes from #7" --body-file - < /dev/null
+  finish debrief 'notes
+factory-result: {"station":"debrief","status":"debriefed","lessons":[]}'
+  : > "$FAKE_LOG.stdin"
+  acts
+  assert_eq completed "$(status_of lessons)" "lessons"
+  posted=$(fake_stdin)
+  assert_contains "$posted" "factory: run timeline (UTC)"
+  assert_contains "$posted" "- build: 2026-11-19T01:00:00Z"
+  assert_contains "$posted" "- evidence: 2026-11-19T01:14:02Z (+14m 2s)"
+  assert_contains "$posted" "- ship: 2026-11-19T01:40:00Z (+25m 58s)"
+  assert_contains "$posted" "- merge: 2026-11-19T01:40:00Z (+0s)"
+  assert_contains "$posted" '<!-- factory:{"kind":"timeline"} -->'
+}
+
+test_cleanup_is_stamped_once_the_worktree_is_gone() {
+  world
+  clock 2026-11-19T02:00:00Z
+  to_build
+  w=$(wt_path)
+  run_done
+  : > "$FAKE_LOG.stdin"
+  acts
+  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  assert_contains "$(fake_stdin)" "$(stage_marker cleanup 2026-11-19T02:00:00Z)"
+}

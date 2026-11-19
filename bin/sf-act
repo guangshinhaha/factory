@@ -227,6 +227,44 @@ prep() {
   printf '%s\n' "$wt"
 }
 
+# ---- stage timestamps (#63) -------------------------------------------------------------------------
+
+# stage <name>: stamp when the factory began a stage of this Run: one `factory: stage` comment with
+# a `stage` marker, once per stage since the issue was last labelled ready (a round 2 stage keeps
+# the round 1 stamp). The time is sf-act's own clock, UTC; `name` is one of the fixed stage names.
+# Best effort: a stamp that fails is logged and never changes what the Run does.
+# The stamps are the Run's timeline: sf-act's `lessons` step prints them as the waits between them.
+stage() {
+  sg_marks=$(markers_since_ready "$repo" "$issue") || { log "#$issue: stage $1 not stamped: timeline not read"; return 0; }
+  if printf '%s\n' "$sg_marks" | jq -e --arg s "$1" 'any(.[]; .kind == "stage" and .stage == $s)' > /dev/null 2>&1; then return 0; fi
+  sg_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { log "#$issue: stage $1 not stamped: no clock"; return 0; }
+  sg_m=$(jq -cn --arg s "$1" --arg at "$sg_at" '{kind: "stage", stage: $s, at: $at}') || return 0
+  printf 'factory: stage %s began at %s.\n\n<!-- factory:%s -->\n' "$1" "$sg_at" "$sg_m" | comment || return 0
+}
+
+# post_timeline: the Run's last comment, once: each stamped stage with its time and the time since
+# the previous stamped stage, which holds that stage's run and any wait for the next sf-tick. Built
+# only from the stamps above (UTC times sf-act wrote), never from text copied from GitHub.
+post_timeline() {
+  pt_marks=$(markers_since_ready "$repo" "$issue") || { log "#$issue: timeline not posted: timeline not read"; return 0; }
+  if printf '%s\n' "$pt_marks" | jq -e 'any(.[]; .kind == "timeline")' > /dev/null 2>&1; then return 0; fi
+  # shellcheck disable=SC2016 # jq program
+  pt_lines=$(printf '%s\n' "$pt_marks" | jq -r '
+    def order: ["build", "evidence", "review", "verify", "ship", "merge", "cleanup"];
+    def dur: if . < 60 then "\(.)s" elif . < 3600 then "\(. / 60 | floor)m \(. % 60)s" else "\(. / 3600 | floor)h \(. % 3600 / 60 | floor)m \(. % 60)s" end;
+    def epoch: try fromdateiso8601 catch null;
+    [.[] | select(.kind == "stage" and (.stage | type) == "string" and (.stage as $s | order | index($s)) != null
+        and (.at | type) == "string" and (.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and (.at | epoch) != null)]
+    | reduce .[] as $m ([]; if any(.[]; .stage == $m.stage) then . else . + [$m] end)
+    | sort_by(.stage as $s | order | index($s))
+    | reduce .[] as $m ({prev: null, out: []};
+        .out += ["- \($m.stage): \($m.at)" + (if .prev == null then "" else " (+\([($m.at | epoch) - .prev, 0] | max | dur))" end)]
+        | .prev = ($m.at | epoch))
+    | .out[]' 2> /dev/null) || { log "#$issue: timeline not posted: stamps not read"; return 0; }
+  [ -n "$pt_lines" ] || return 0
+  printf 'factory: run timeline (UTC). "+" is the time since the previous stage began: that stage'"'"'s run plus any wait for the next sf-tick.\n\n%s\n\n<!-- factory:{"kind":"timeline"} -->\n' "$pt_lines" | comment || return 0
+}
+
 # ---- giving up -------------------------------------------------------------------------------
 
 # close_terminals_of <worktree path>: close every live terminal in that worktree. Idempotent; a
@@ -420,6 +458,7 @@ start_worker() {
   fi
   if o worker-start --task "$t" --agent "$agent" --model "$model" --worktree "path:$wt" --run "$1" --json > "$tmp/started" 2> "$tmp/err"; then
     log "#$issue: started $title ($agent/$model)"
+    case "$st" in build | review | verify) stage "$st" ;; esac
     return 0
   fi
   why=$(cat "$tmp/started" "$tmp/err" | tr '\n' ' ' | clip)
@@ -559,6 +598,7 @@ step_gate() {
       ;;
     *) log "#$issue: gantry-gate-evidence exited $rc: $(first "$tmp/gate")"; return 1 ;;
   esac
+  stage evidence
   pr=$(open_pr "$b") || { log "open PRs for $b not listed"; return 1; }
   if [ -z "$pr" ]; then
     it=$(gh issue view "$issue" -R "$repo" --json title -q .title) || { log "title of #$issue not read"; return 1; }
@@ -576,11 +616,13 @@ step_ship() {
   pr=$3
   wt=$(branch_wt "$(branch)")
   [ -n "$wt" ] || { give_up "$2" ship "no worktree on branch $(branch)"; return 1; }
+  stage ship
   rc=0
   (cd "$wt" && sf-ship --repo "$repo" "$issue" "$pr") > "$tmp/ship" || rc=$?
   last=$(awk 'NF { l = $0 } END { print l }' "$tmp/ship")
   case $rc in
     0)
+      case "$last" in MERGED\ *) stage merge ;; esac
       queue_debrief "$1" "$2"
       done_with "$2" "$last"
       ;;
@@ -659,6 +701,7 @@ step_lessons() {
       printf '%s\n' "$t" >> "$tmp/titles"
     done < "$tmp/lessons"
   fi
+  post_timeline
   done_with "$2" "lessons filed"
 }
 
@@ -818,6 +861,7 @@ act_cleanup() {
   fi
   orca worktree rm --worktree "path:$w" --delete-branch --json > /dev/null 2> "$tmp/err" || { log "#$issue: worktree $w not removed: $(first "$tmp/err")"; return 1; }
   log "#$issue: removed worktree $w"
+  stage cleanup
 }
 
 # act_stop <reason> [run task [dispatch [agent_failed]]]
