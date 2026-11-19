@@ -37,7 +37,7 @@ Merge only with `gh pr merge --squash --match-head-commit <sha>`. If gh refuses,
 
 ## Working style
 
-If the shinstack plugin (github.com/guangshinhaha/shinstack) is installed, follow `shinstack:craft`, which its session hook loads. If it isn't installed, ignore this section.
+If the shinstack plugin (github.com/guangshinhaha/shinstack) is installed, follow `shinstack:router`, which its session hook loads. If it isn't installed, ignore this section.
 
 ## shinstack
 shinstack-mode: auto
