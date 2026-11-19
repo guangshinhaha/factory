@@ -125,6 +125,7 @@ test_high_risk_pr_parked_for_a_human_gets_one_merge_ask_per_head() {
   echo '{"labels":[{"name":"risk:high"}]}' | fixture gh pr view 9 -R "$REPO" --json labels
   echo "{\"files\":[{\"path\":\"bin/sf-act\"}],\"labels\":[{\"name\":\"risk:high\"}],\"headRefOid\":\"$HEAD_SHA\"}" \
     | fixture gh pr view 9 -R "$REPO" --json files,labels,headRefOid
+  echo '{"isCrossRepository":false}' | fixture gh pr view 9 -R "$REPO" --json isCrossRepository
   ship_status
   assert_eq PARKED "$(last_line)" "result"
   assert_eq 1 "$(count_calls "gh issue comment 7")" "ask comments"

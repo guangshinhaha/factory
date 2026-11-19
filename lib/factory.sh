@@ -61,16 +61,35 @@ markers_since_ready() {
 # (PR files, risk label, station comments that name the head, head SHA), then one recommended
 # action. Every gh read is best effort: a part whose data can't be read says so, it is never
 # guessed. Used by sf-stop (every stop) and sf-ship (the merge ask). Never fails.
-# shellcheck disable=SC2016 # backticks in the printed text are Markdown, not command substitution
+#
+# The comment is public and posted under the owner's account, and the PR may come from a fork, so
+# every string copied from GitHub is untrusted: file names and station lines are cut down to
+# [A-Za-z0-9._/+=,:~ -] (anything else becomes ?), truncated, and shown in a code span; a fork PR
+# shows a file count, no names. Whatever else is in the text, `<!--` never leaves this function, so
+# markers_since_ready can never read a marker out of it. Callers append their own marker after it.
 ask_body() {
+  ask_body_text "$@" | sed 's/<!--/\&lt;!--/g'
+}
+
+# ask_body_text: ask_body before the `<!--` guard.
+# shellcheck disable=SC2016 # backticks in the printed text are Markdown, not command substitution
+ask_body_text() {
   ab_repo=$1 ab_pr=$2 ab_headline=$3 ab_why=$4 ab_action=${5:-}
-  ab_files='' ab_labels='' ab_head='' ab_seen='' ab_other=''
+  ab_files='' ab_nfiles='' ab_fork=unknown ab_labels='' ab_head='' ab_seen='' ab_other=''
   if [ -n "$ab_pr" ]; then
     ab_json=$(gh pr view "$ab_pr" -R "$ab_repo" --json files,labels,headRefOid 2> /dev/null) || ab_json=
     if [ -n "$ab_json" ]; then
-      ab_head=$(printf '%s\n' "$ab_json" | jq -r '.headRefOid // empty' 2> /dev/null)
-      ab_labels=$(printf '%s\n' "$ab_json" | jq -r '[.labels[]?.name] | join(",")' 2> /dev/null)
-      ab_files=$(printf '%s\n' "$ab_json" | jq -r '[.files[]?.path] | if length == 0 then "" else (.[0:8] | join(", ")) + (if length > 8 then ", and \(length - 8) more" else "" end) end' 2> /dev/null)
+      ab_head=$(printf '%s\n' "$ab_json" | jq -r '.headRefOid // empty' 2> /dev/null | tr -cd 'A-Za-z0-9')
+      ab_labels=$(printf '%s\n' "$ab_json" | jq -r '[.labels[]?.name] | join(",")' 2> /dev/null | tr -cd 'A-Za-z0-9:_.,-')
+      ab_nfiles=$(printf '%s\n' "$ab_json" | jq -r '[.files[]?.path] | length' 2> /dev/null)
+      # Names are untrusted: sanitised and capped in jq so a newline in a name cannot split the output.
+      ab_files=$(printf '%s\n' "$ab_json" | jq -r '[.files[]?.path
+          | tostring | gsub("[^A-Za-z0-9._/+=,:~ -]"; "?") | gsub("(?i)factory:"; "factory_") | .[0:60] + (if length > 60 then "..." else "" end) | "`" + . + "`"]
+        | if length == 0 then "" else (.[0:8] | join(", ")) + (if length > 8 then ", and \(length - 8) more" else "" end) end' 2> /dev/null)
+      case $(gh pr view "$ab_pr" -R "$ab_repo" --json isCrossRepository 2> /dev/null | jq -r '.isCrossRepository' 2> /dev/null) in
+        false) ab_fork=no ;;
+        true) ab_fork=yes ;;
+      esac
     fi
     ab_cm=$(gh api "repos/$ab_repo/issues/$ab_pr/comments" --paginate 2> /dev/null) || ab_cm=
     if [ -n "$ab_cm" ] && [ -n "$ab_head" ]; then
@@ -79,7 +98,7 @@ ask_body() {
         if all(.[]; type == "array") then add else empty end
         | [.[] | select((.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a))
             | select((.body // "") | test("(^|\n)Findings:") or contains("Codex review not run: "))]
-        | {at: [.[] | select(.body | contains($h)) | (.body | split("\n") | map(select(test("^(factory |Findings:|Codex review not run)"))) | map(.[0:140]) | join(" / "))],
+        | {at: [.[] | select(.body | contains($h)) | (.body | split("\n") | map(select(test("^(factory |Findings:|Codex review not run)"))) | map(gsub("[^A-Za-z0-9._/+=,:~ -]"; "?") | gsub("(?i)factory:"; "factory_") | .[0:140]) | join(" / ") | "`" + . + "`")],
            n: length}
         | (.at[] | "S:" + .), (if (.at | length) == 0 and .n > 0 then "O:" else empty end)' 2> /dev/null) || ab_all=
       ab_seen=$(printf '%s\n' "$ab_all" | sed -n 's/^S://p')
@@ -95,6 +114,9 @@ ask_body() {
   printf '\n\n'
   if [ -z "$ab_pr" ]; then
     printf '**What this changes:** unknown: there is no PR yet.\n'
+  elif [ "$ab_fork" != no ] && [ -n "$ab_nfiles" ]; then
+    if [ "$ab_fork" = yes ]; then ab_from='is from a fork'; else ab_from='is not confirmed to be from this repo'; fi
+    printf '**What this changes:** PR #%s %s and changes %s files; read them with `gh pr diff %s -R %s`. Whether anything runs it yet is not known to the factory.\n' "$ab_pr" "$ab_from" "$ab_nfiles" "$ab_pr" "$ab_repo"
   elif [ -n "$ab_files" ]; then
     printf '**What this changes:** PR #%s touches: %s. Whether anything runs it yet is not known to the factory.\n' "$ab_pr" "$ab_files"
   else

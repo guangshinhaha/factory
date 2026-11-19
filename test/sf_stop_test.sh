@@ -32,6 +32,7 @@ pr_world() {
   world
   printf '{"files":[{"path":"bin/sf-act"},{"path":"lib/x.sh"}],"labels":%s,"headRefOid":"%s"}\n' "$1" "$HEAD" \
     | fixture gh pr view 9 -R "$REPO" --json files,labels,headRefOid
+  echo '{"isCrossRepository":false}' | fixture gh pr view 9 -R "$REPO" --json isCrossRepository
   printf '%s\n' "$2" | fixture gh api "repos/$REPO/issues/9/comments" --paginate
 }
 station() { jq -cn --arg b "$1" '{author_association: "OWNER", body: $b}'; }
@@ -43,9 +44,10 @@ Findings: none")]"
   sf_stop --pr 9 7 "review r2: findings in round 2 (https://x/c2)" > /dev/null
   body=$(fake_stdin)
   assert_contains "$body" "factory: stopped. review r2: findings in round 2 (https://x/c2)"
-  assert_contains "$body" "**What this changes:** PR #9 touches: bin/sf-act, lib/x.sh."
+  # shellcheck disable=SC2016 # backticks are the Markdown code spans being asserted
+  assert_contains "$body" '**What this changes:** PR #9 touches: `bin/sf-act`, `lib/x.sh`.'
   assert_contains "$body" "**Why it is risky:** labelled risk:high"
-  assert_contains "$body" "**Already checked** (head $HEAD): factory review: round 1, head $HEAD / Findings: none"
+  assert_contains "$body" "**Already checked** (head $HEAD): \`factory review: round 1, head $HEAD / Findings: none\`"
   assert_contains "$body" "gh pr diff 9 -R $REPO"
   assert_contains "$body" "**Recommended:** Read the reason"
   assert_contains "$body" '<!-- factory:{"kind":"stop"} -->'
@@ -85,8 +87,9 @@ evil_world() {
   jq -cn --argjson f "$1" --arg h "$HEAD" '{files: [$f[] | {path: .}], labels: [{name: "risk:high"}], headRefOid: $h}' \
     | fixture gh pr view 9 -R "$REPO" --json files,labels,headRefOid
   echo "{\"isCrossRepository\":$2}" | fixture gh pr view 9 -R "$REPO" --json isCrossRepository
-  printf '[%s]\n' "$(station "${3:-factory review: round 1, head $HEAD
-Findings: none}")" | fixture gh api "repos/$REPO/issues/9/comments" --paginate
+  st=${3:-}
+  [ -n "$st" ] || st=$(printf 'factory review: round 1, head %s\nFindings: none' "$HEAD")
+  printf '[%s]\n' "$(station "$st")" | fixture gh api "repos/$REPO/issues/9/comments" --paginate
 }
 # The only marker in a posted body is the stop marker sf-stop appends; the rest is plain text.
 assert_only_the_stop_marker() {
@@ -115,10 +118,13 @@ test_stop_file_name_cannot_open_a_comment_or_forge_a_marker() {
 }
 
 test_stop_file_name_mention_and_markdown_link_are_neutralised() {
-  evil_world '["@octocat","[click](https://evil.example/x)","a`b`c$(touch /tmp/sf_pwned)"]' false
+  # shellcheck disable=SC2016 # the backticks and $( ) are the hostile file name, not expansions
+  evil_world '["@octocat","[click](https://evil.example/x)","a\u0060b\u0060c$(touch /tmp/sf_pwned)"]' false
   sf_stop --pr 9 7 "r" > /dev/null
   assert_only_the_stop_marker "$(fake_stdin)"
-  assert_eq 0 "$(printf '%s\n' "$(fake_stdin)" | grep -c 'evil.example')" "link target in the body"
+  # The name survives only as inert text inside a code span.
+  # shellcheck disable=SC2016 # backticks are the Markdown code span being asserted
+  assert_contains "$(fake_stdin)" '`?click??https://evil.example/x?`'
 }
 
 test_stop_station_comment_lines_are_neutralised_too() {
