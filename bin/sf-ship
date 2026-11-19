@@ -72,7 +72,7 @@ retry() {
 }
 
 stop() {
-  sh "$bindir/sf-stop" --repo "$repo" "$issue" "$1" >&2 || echo "$me: sf-stop failed; fail the ship task so sf-state owes the stop" >&2
+  sh "$bindir/sf-stop" --repo "$repo" --pr "$pr" "$issue" "$1" >&2 || echo "$me: sf-stop failed; fail the ship task so sf-state owes the stop" >&2
   echo "STOPPED: $1"
   exit 1
 }
@@ -161,7 +161,26 @@ if [ "$draft" = true ]; then
   gh pr ready "$pr" -R "$repo" > /dev/null 2>&1 || retry "PR #$pr still a draft (gh pr ready failed)"
 fi
 
+# merge_ask: a PR labelled risk:high that waits on a human gets one comment on the issue per head,
+# saying why and how to check it. Best effort: a failed read or post never changes the result.
+merge_ask() {
+  case ",$(jq -r '[.labels[]?.name] | join(",")' "$tmp/ask.json" 2> /dev/null)," in
+    *,risk:high,*) ;;
+    *) return 0 ;;
+  esac
+  marks=$(markers_since_ready "$repo" "$issue") || return 0
+  printf '%s\n' "$marks" | jq -e --arg h "$start_head" 'any(.[]; .kind == "ask" and .head == $h)' > /dev/null && return 0
+  { ask_body "$repo" "$pr" "factory: PR #$pr is ready and waits for you to merge it." \
+      "shinstack-mode on $base is ${mode:-supervised} with merge ${merge_mode:-unset}, so the factory does not merge a PR on its own." \
+      "If the checks above pass, merge with \`gh pr merge $pr -R $repo --squash --match-head-commit $start_head\`."
+    printf '\n<!-- factory:{"kind":"ask","head":"%s"} -->\n' "$start_head"
+  } | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null 2>&1 || echo "$me: merge ask not posted on #$issue (gh issue comment failed)" >&2
+  return 0
+}
+
 if [ "$auto_merge" = 0 ]; then
+  gh pr view "$pr" -R "$repo" --json labels > "$tmp/ask.json" 2> /dev/null || : > "$tmp/ask.json"
+  merge_ask
   echo "$me: shinstack-mode ${mode:-supervised} on $base: PR #$pr left ready for review"
   echo "PARKED"
   exit 0

@@ -211,7 +211,9 @@ def ready: has_label("ready") and (has_label("needs-shin") or has_label("icebox"
 # Factory marker comments, <!-- factory:{"kind":...} -->, from people with write access only,
 # so a passer-by cannot hold, stop or restart an issue.
 def trusted: (.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a);
-def markers: [(.body // "") | scan("<!-- factory:(\\{.*?\\}) -->") | .[0] | (try fromjson catch empty)];
+# Only the final non-empty line of a comment counts: every factory comment ends with its marker.
+def markers: [(.body // "" | split("\n") | map(rtrimstr("\r") | select(test("\\S"))) | last // "")
+  | scan("^<!-- factory:(\\{.*\\}) -->$") | .[0] | (try fromjson catch empty)];
 # A hold reset must be UTC ISO-8601 (2026-11-15T10:00:00Z); a hold without one is ignored.
 # UTC ISO-8601 only (2026-11-15T10:00:00Z, fractions allowed); anything else is an error.
 # Fractional seconds are dropped first: fromdateiso8601 rejects them.

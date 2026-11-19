@@ -1,7 +1,11 @@
 #!/bin/sh
 # sf-stop: the factory's only failure exit for an issue. Comments
 # `factory: stopped. <reason>` with a stop marker, then swaps `ready` for `needs-shin`.
-# Usage: sf-stop [--repo owner/repo] <issue> <reason>
+# Usage: sf-stop [--repo owner/repo] [--pr <pr>] <issue> <reason>
+#
+# The comment carries what the PR changes, why it is risky, what the stations checked at the head
+# and how to check it, then one recommended action (ask_body in lib/factory.sh). With no --pr the
+# parts that need a PR say so.
 #
 # Idempotent: a stop marker already on the issue since its last `ready` label means the comment
 # is not posted again, and labels already right are not edited. The comment goes first, so a
@@ -22,7 +26,14 @@ if [ "${1:-}" = --repo ]; then
   repo=$2
   shift 2
 fi
-[ $# -eq 2 ] || usage_error "usage: sf-stop [--repo owner/repo] <issue> <reason>"
+pr=
+if [ "${1:-}" = --pr ]; then
+  [ $# -ge 2 ] || usage_error "--pr needs a PR number"
+  is_number "$2" || usage_error "PR [$2] is not a number"
+  pr=$2
+  shift 2
+fi
+[ $# -eq 2 ] || usage_error "usage: sf-stop [--repo owner/repo] [--pr <pr>] <issue> <reason>"
 issue=$1
 reason=$2
 is_number "$issue" || usage_error "issue [$issue] is not a number"
@@ -35,8 +46,9 @@ marks=$(markers_since_ready "$repo" "$issue") || die "timeline of #$issue not re
 if printf '%s\n' "$marks" | jq -e 'any(.[]; .kind == "stop")' > /dev/null; then
   echo "$me: #$issue already has a stop comment since it was last labelled ready"
 else
-  printf 'factory: stopped. %s\n\n<!-- factory:{"kind":"stop"} -->\n' "$reason" \
-    | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
+  { ask_body "$repo" "$pr" "factory: stopped. $reason" "the factory stopped and does not retry on its own; the cause is named above."
+    printf '\n<!-- factory:{"kind":"stop"} -->\n'
+  } | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
     || die "stop comment not posted on #$issue (gh issue comment failed)"
   echo "$me: posted stop comment on #$issue"
 fi
