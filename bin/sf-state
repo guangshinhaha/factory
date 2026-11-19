@@ -21,7 +21,10 @@
 #   {"action":"abandon","issue":N,"run":R,"reason":S}    issue N closed before its live Run merged (no debrief)
 #   {"action":"cleanup","issue":N,"worktree":W}          closed issue N has no live Run, and W, a worktree the factory
 #                                                        made for it (not main, linked to N, branch `<repo>-N` or
-#                                                        `debrief-<repo>-N`), has no live terminal and no agent
+#                                                        `debrief-<repo>-N`) with no agent and no open PR from its
+#                                                        branch; its idle terminals (Orca's `Setup`, a shell) don't
+#                                                        block, sf-act closes them. The debrief worktree stays until
+#                                                        its docs PR merges, so it is not a leak
 # Otherwise a closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task
 # (they run after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
 #
@@ -359,13 +362,16 @@ def run_state:
   | ([$idle[] | select(.attempts < 3 and (.deps | length) > 0) | {action: "hold", issue: .n, reason: "depends on open \(.deps | map("#\(.)") | join(", "))"}]) as $holds
   | ([$idle[] | select(.attempts < 3 and (.deps | length) == 0)] | .[0:$capacity] | map({action: "start", issue: .n})) as $starts
   # Cleanup: a closed issue with no live Run, and a worktree made for it by the factory. Only the
-  # names the factory gives count, never other worktrees on the host, and nothing alive in it: no
-  # terminal (sf-act closes those on a stop), no agent.
+  # names the factory gives count, never other worktrees on the host, and no agent alive in it.
+  # Terminals do not block: Orca leaves a Setup terminal open in every worktree, so sf-act
+  # closes them before the removal. A worktree whose branch has an open PR stays: a
+  # debrief-<repo>-N worktree stays until its docs PR merges, so a leftover one is not a leak.
   | ([$runs[] | select(.state == "live") | .objective | lc] | map(select(startswith("factory \($repo_lc)#")))) as $live_objs
-  | ([$worktrees[0][] | select(.isMainWorktree != true and (.path | type) == "string" and (.repo // "") == $name and .liveTerminalCount == 0 and ((.agents // []) | length) == 0
+  | ([$worktrees[0][] | select(.isMainWorktree != true and (.path | type) == "string" and (.repo // "") == $name and ((.agents // []) | length) == 0
         and (.linkedIssue | type) == "number")
       | .linkedIssue as $n | ((.branch // "") | ltrimstr("refs/heads/")) as $b
       | select($b == "\($name)-\($n)" or $b == "debrief-\($name)-\($n)")
+      | select($prs[0] | map(.headRefName) | index($b) | not)
       | select(($open | index($n) | not) and ($live_objs | index("factory \($repo_lc)#\($n)") | not))
       | {action: "cleanup", issue: $n, worktree: .path}]) as $cleanups
   | $run_actions + $stops + $holds + $starts + $cleanups | sort_by(.issue)

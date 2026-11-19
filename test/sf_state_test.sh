@@ -810,21 +810,38 @@ test_cleanup_of_a_closed_issues_idle_factory_worktree() {
   assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "actions"
 }
 
-test_cleanup_waits_for_an_open_issue_a_live_terminal_an_agent_or_a_live_run() {
+test_cleanup_waits_for_an_open_issue_an_agent_or_a_live_run() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
   worktrees "[$(wt /w/app-7 app-7 7)]"
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "open issue"
   issues '[]'
-  worktrees "[$(wt /w/app-7 app-7 7 1)]"
-  assert_eq '[]' "$(state)" "live terminal"
   worktrees "[$(wt /w/app-7 app-7 7 0 '[{"state":"working"}]')]"
   assert_eq '[]' "$(state)" "live agent"
   worktrees "[$(wt /w/app-7 app-7 7)]"
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
   assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "live run"
+}
+
+test_cleanup_does_not_wait_for_idle_terminals_only_for_an_agent() {
+  world
+  worktrees "[$(wt /w/app-7 app-7 7 2), $(wt /w/debrief-app-7 debrief-app-7 7 1)]"
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "terminals only"
+  worktrees "[$(wt /w/app-7 app-7 7 2 '[{"state":"working"}]')]"
+  assert_eq '[]' "$(state)" "terminals and an agent"
+}
+
+test_cleanup_keeps_a_worktree_whose_branch_has_an_open_pr() {
+  world
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"lessons"}]'
+  worktrees "[$(wt /w/app-7 app-7 7 0), $(wt /w/debrief-app-7 debrief-app-7 7 1)]"
+  prs '[{"number":70,"headRefName":"debrief-app-7"}]'
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"}]' "$(state)" "docs PR open"
+  prs '[]'
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "docs PR merged"
 }
 
 test_cleanup_follows_a_finished_run_of_a_closed_issue() {

@@ -778,6 +778,40 @@ test_a_merged_runs_worktree_and_branch_are_removed_and_a_second_fire_does_nothin
   assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls after a second fire"
 }
 
+test_a_merged_runs_idle_terminals_are_closed_so_its_worktree_is_removed_with_no_manual_step() {
+  world
+  to_build
+  w=$(wt_path)
+  worker_terminal term_setup
+  worker_terminal term_shell
+  worker_terminal term_main "$TEST_TMP/app"
+  run_done
+  acts
+  assert_called "orca terminal close --terminal term_setup --json"
+  assert_called "orca terminal close --terminal term_shell --json"
+  assert_not_called "orca terminal close --terminal term_main --json"
+  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  closed=$(grep -n '^orca terminal close' "$FAKE_LOG" | tail -n 1 | cut -d: -f1)
+  removed=$(grep -n '^orca worktree rm' "$FAKE_LOG" | head -n 1 | cut -d: -f1)
+  [ "$closed" -lt "$removed" ] || fail "worktree removed before its terminals were closed"
+}
+
+test_a_cleanup_whose_terminals_cannot_be_closed_keeps_the_worktree_and_the_next_fire_retries() {
+  world
+  to_build
+  w=$(wt_path)
+  worker_terminal term_setup
+  run_done
+  orca_fails close "orca: terminal busy"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  [ -d "$w" ] || fail "worktree removed with its terminal still open"
+  orca_ok close
+  acts
+  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+}
+
 test_a_worktree_with_uncommitted_changes_is_never_removed_and_its_path_is_reported() {
   world
   to_build
