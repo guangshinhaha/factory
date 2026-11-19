@@ -157,7 +157,8 @@ case "$cmd" in
   ps)
     # The checkout itself is the main worktree; its terminals (sf-act's own) never count for others.
     jq -c '{ok: true, result: {worktrees: [.worktrees[] | . as $w | {path, branch: "refs/heads/\(.branch)", repo, isMainWorktree: false,
-        linkedIssue: .issue, liveTerminalCount: ([$st.terminals[] | select(.worktree == "path:\($w.path)")] | length)}], totalCount: (.worktrees | length), truncated: false}}' \
+        linkedIssue: .issue, liveTerminalCount: ([$st.terminals[] | select(.worktree == "path:\($w.path)")] | length),
+        agents: [($st.agents // [])[] | select(.worktree == $w.path) | {mainAgent: {state, outcome}}]}], totalCount: (.worktrees | length), truncated: false}}' \
       --argjson st "$(cat "$st")" "$st"
     ;;
   list)
