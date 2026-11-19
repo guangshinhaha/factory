@@ -203,6 +203,40 @@ test_re_readied_issue_after_three_attempts_gets_a_fresh_count() {
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
 }
 
+# A full page (1000) may be cut off: a live Run whose issue fell off the list would look closed
+# and be abandoned. Fail closed instead.
+test_a_full_page_of_open_issues_is_an_error() {
+  world
+  issues "$(jq -cn '[range(1; 1001) | {number: ., labels: [], body: ""}]')"
+  if state > /dev/null 2> "$TEST_TMP/err"; then fail "sf-state accepted a full page of open issues"; fi
+  assert_contains "$(cat "$TEST_TMP/err")" "open issues not listed: 1000 issues is the page limit" "stderr"
+}
+
+test_a_full_page_of_open_prs_is_an_error() {
+  world
+  prs "$(jq -cn '[range(1; 1001) | {number: ., headRefName: "b\(.)"}]')"
+  if state > /dev/null 2> "$TEST_TMP/err"; then fail "sf-state accepted a full page of open PRs"; fi
+  assert_contains "$(cat "$TEST_TMP/err")" "open PRs not listed: 1000 PRs is the page limit" "stderr"
+}
+
+# Reopening an issue that still has `ready` is a re-ready: its abandoned (dead) Run is history.
+test_reopened_ready_issue_with_an_abandoned_run_starts_again() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"closed","created_at":"2026-11-03T00:00:00Z"},{"event":"reopened","created_at":"2026-11-05T00:00:00Z"}]'
+  runs "[$(run_json run_old 7 2026-11-02T00:00:00Z)]"
+  tasks run_old '[{"id":"t1","status":"failed","title":"build"}]'
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
+
+test_reopened_event_with_no_utc_time_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"reopened","created_at":"yesterday"}]'
+  if state > /dev/null 2> "$TEST_TMP/err"; then fail "sf-state accepted a reopened event with no UTC time"; fi
+  assert_contains "$(cat "$TEST_TMP/err")" "timeline of #7 has a reopened event with no UTC time" "stderr"
+}
+
 test_concurrency_full_starts_nothing() {
   world
   issues "[$(ready_issue_json 5),$(ready_issue_json 6),$(ready_issue_json 7)]"

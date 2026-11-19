@@ -85,6 +85,9 @@ jq -se 'length == 1 and (.[0] | type == "array")' "$tmp/issues.json" > /dev/null
 # A whole number up to 2^53-1: jq calls NaN and 1e1000 numbers, so type alone is no check.
 jq -e 'all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991))' "$tmp/issues.json" > /dev/null 2>&1 \
   || die "open issues not listed: an issue number is not a whole number"
+# gh stops at --limit without saying so; a cut-off list would make live Runs look closed.
+jq -e 'length < 1000' "$tmp/issues.json" > /dev/null \
+  || die "open issues not listed: 1000 issues is the page limit, so the list may be cut off"
 dup=$(jq -r '[.[].number] | group_by(.)[] | select(length > 1) | .[0]' "$tmp/issues.json" | head -n 1)
 [ -z "$dup" ] || die "open issues not listed: issue #$dup is listed twice"
 
@@ -93,6 +96,8 @@ gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCros
   || die "open PRs not listed (gh pr list failed)"
 jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991) and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))' "$tmp/prs.raw" > /dev/null 2>&1 \
   || die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository"
+jq -e 'length < 1000' "$tmp/prs.raw" > /dev/null \
+  || die "open PRs not listed: 1000 PRs is the page limit, so the list may be cut off"
 jq -c '[.[] | select(.isCrossRepository == false)]' "$tmp/prs.raw" > "$tmp/prs.json" || die "open PRs not filtered (jq failed)"
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
@@ -189,6 +194,8 @@ while read -r n kind; do
   fi
   jq -e '[.events[] | select(.event == "labeled") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
     "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a label event with no UTC time"
+  jq -e '[.events[] | select(.event == "reopened") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
+    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a reopened event with no UTC time"
   jq -e '[.events[] | select(.event == "commented") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
     "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a comment with no UTC time"
   cat "$tmp/timeline.json" >> "$tmp/timelines.jsonl"
@@ -260,7 +267,8 @@ def run_state:
 | [ $issues[0][] | select(ready or ($tl[.number | tostring] != null)) | . as $i
     | ($i | ready) as $is_ready
     | ($tl[$i.number | tostring] // []) as $events
-    | ([$events[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
+    # A reopen counts like a re-ready: an abandoned Run of a reopened issue is history.
+    | ([$events[] | select((.event == "labeled" and .label.name == "ready") or .event == "reopened") | .created_at] | max // "") as $since
     | (if $since == "" then -1 else ($since | epoch) end) as $since_e
     | [$events[] | select(.event == "commented" and .created_at > $since and trusted) | .created_at as $at | markers[]
         | select(.kind != "hold" or reset_epoch != null) | . + {at: $at}] as $marks
