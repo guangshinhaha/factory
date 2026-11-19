@@ -16,7 +16,11 @@
 #     an open PR from this repo's `factory-init` (not a fork's) means it waits for that PR.
 #     Never pushes the default branch, and runs none of the repo's git hooks (see below).
 #  3. Orca automation `factory-<owner>/<repo>` (cron every 5 min, claude, prompt /factory:foreman,
-#     precheck sf-tick, in the workspace): created unless one with that name exists.
+#     precheck an absolute-path sf-tick with this PATH, in the workspace): created unless one with that name exists.
+#
+# Before any write it checks that gantry's gates resolve on this PATH, the one the automation's
+# precheck is given (Orca's own PATH has neither gantry nor the plugin's bin/), and fails naming
+# the missing command.
 #
 # Exit 0: everything is set up, or waits only on the factory-init PR. 1: a step failed; run it
 # again. 2: bad arguments, or jq missing.
@@ -24,7 +28,8 @@ set -u
 
 me=sf-init
 # shellcheck source=lib/factory.sh
-. "$(cd "$(dirname "$0")/.." && pwd)/lib/factory.sh"
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/lib/factory.sh"
 
 repo=
 ws=
@@ -44,6 +49,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 need_jq
+for c in sf-tick sf-act; do
+  [ -r "$root/bin/$c" ] || die "$c not found next to sf-init"
+done
+for c in gantry-gate-evidence gantry-verdict-check; do
+  command -v "$c" > /dev/null 2>&1 || die "$c not found on PATH (the automation runs sf-tick with this PATH; install gantry or add it to PATH)"
+done
 repo=$(resolve_repo "$repo") || exit 2
 branch=factory-init
 
@@ -229,8 +240,13 @@ found=$(jq -r --arg n "$auto" '
 if [ "$found" = true ]; then
   echo "$me: automation $auto exists"
 else
+  case "$root$PATH" in
+    *"'"*) usage_error "a path or PATH holds a single quote: $root" ;;
+  esac
+  # Orca runs the precheck with its own PATH: set this one, and call sf-tick by path.
+  precheck="PATH='$PATH' sh '$root/bin/sf-tick'"
   orca automations create --name "$auto" --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck sf-tick --workspace "path:$ws" --json > /dev/null \
+    --prompt /factory:foreman --precheck "$precheck" --workspace "path:$ws" --json > /dev/null \
     || die "automation $auto missing (orca automations create failed)"
   echo "$me: created automation $auto"
 fi

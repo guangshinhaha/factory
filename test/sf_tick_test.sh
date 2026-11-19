@@ -219,3 +219,23 @@ test_a_mkdir_that_succeeds_on_an_existing_dir_takes_no_held_lock() {
   assert_eq 1 "$(terminals)" "terminals"
   assert_eq 1 "$(cat "$TEST_TMP/a.out" "$TEST_TMP/b.out" | grep -c 'spawned sf-act')" "ticks that spawned sf-act"
 }
+
+test_a_recent_sf_act_failure_is_reported_in_the_last_line() {
+  tick_world
+  echo "2026-01-01T00:00:00Z sf-act acme/app: gantry-gate-evidence not found on PATH" > "$FACTORY_ACT_LOG"
+  tick
+  assert_eq 1 "$tick_status" "sf-tick exit status"
+  last=$(tail -n 1 "$TEST_TMP/tick.out")
+  assert_contains "$last" "sf-act failed recently"
+  assert_contains "$last" "gantry-gate-evidence not found on PATH"
+  case $last in *spawned*) fail "last line says spawned: $last" ;; esac
+  assert_eq 1 "$(terminals)" "terminals"
+}
+
+test_an_old_sf_act_failure_is_not_reported() {
+  tick_world
+  echo "old failure" > "$FACTORY_ACT_LOG"
+  age "$FACTORY_ACT_LOG" 120
+  tick
+  assert_contains "$(tail -n 1 "$TEST_TMP/tick.out")" "spawned sf-act for 1 action(s)"
+}

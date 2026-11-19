@@ -16,6 +16,8 @@ export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 world() {
   FAKE_FIXTURES=$TEST_TMP/fx
   export FAKE_FIXTURES
+  # What sf-init gives Orca as the precheck: this PATH, and sf-tick by its absolute path.
+  PRECHECK="PATH='$PATH' sh '$FACTORY_ROOT/bin/sf-tick'"
   ORIGIN=$TEST_TMP/remote/acme/app.git
   WS=$TEST_TMP/ws
   mkdir -p "$TEST_TMP/remote/acme" "$TEST_TMP/seed"
@@ -44,7 +46,7 @@ SSH
   echo "$PR_URL" | fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file -
   automations '[]'
   echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck sf-tick --workspace "path:$WS" --json
+    --prompt /factory:foreman --precheck "$PRECHECK" --workspace "path:$WS" --json
 }
 seed_commit() {
   git -C "$TEST_TMP/seed" add -A
@@ -221,9 +223,9 @@ test_default_workspace_is_the_main_checkout() {
   git -C "$WS" worktree add -q --detach "$TEST_TMP/side"
   main=$WS # the side worktree's main checkout, in git's form
   echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck sf-tick --workspace "path:$main" --json
+    --prompt /factory:foreman --precheck "$PRECHECK" --workspace "path:$main" --json
   (cd "$TEST_TMP/side" && sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO") > /dev/null
-  assert_called "orca automations create --name factory-acme/app --trigger */5 * * * * --provider claude --prompt /factory:foreman --precheck sf-tick --workspace path:$main --json"
+  assert_called "orca automations create --name factory-acme/app --trigger */5 * * * * --provider claude --prompt /factory:foreman --precheck $PRECHECK --workspace path:$main --json"
 }
 
 test_bad_arguments_exit_2() {
@@ -361,5 +363,22 @@ test_origin_off_github_exits_2_without_writes() {
     assert_eq 2 "$status" "exit status for $url"
     assert_contains "$(cat "$TEST_TMP/err")" "origin URL is [$url], not github.com/acme/app"
   done
+  assert_eq 0 "$(count_calls "gh ")" "gh calls"
+}
+
+test_missing_gantry_gates_exit_1_naming_the_command_before_any_write() {
+  world
+  mkdir "$TEST_TMP/nogantry"
+  for t in sh jq git dirname cat; do ln -s "$(command -v "$t")" "$TEST_TMP/nogantry/$t"; done
+  # PATH without the dirs holding a gantry gate (see sf_act_test.sh).
+  p=$TEST_TMP/nogantry
+  for d in $(printf '%s\n' "$PATH" | tr ':' ' '); do
+    [ -e "$d/gantry-gate-evidence" ] || [ -e "$d/gantry-verdict-check" ] || p=$p:$d
+  done
+  status=0
+  PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-init" --repo "$REPO" --workspace "$WS" > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "sf-init exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "gantry-gate-evidence not found on PATH"
+  assert_eq "" "$(writes)" "writes"
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }

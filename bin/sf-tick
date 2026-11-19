@@ -88,5 +88,12 @@ if ! orca terminal create --worktree "path:$(pwd)" --title "sf-act $repo" --comm
   echo "$me: sf-act not spawned (orca terminal create failed)"
   exit 1
 fi
+# A failure sf-act left in the last 30 minutes (see sf-act) goes in the last line, so a repo that
+# never starts a Run doesn't read as healthy.
+alog=$(act_log "$repo")
+if [ -n "$(find "$alog" -mmin -30 2> /dev/null)" ]; then
+  echo "$me: sf-act failed recently, see $alog: $(sed -n 1p "$alog" | cut -c1-300); sf-act run again for $n action(s) in $repo"
+  exit 1
+fi
 echo "$me: spawned sf-act for $n action(s) in $repo"
 exit 1
