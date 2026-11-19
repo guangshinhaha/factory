@@ -14,6 +14,9 @@
 #     ... ,"run":R,"task":T,"dispatch":D}                its worker stopped without reporting again after a nudge
 #   {"action":"nudge","issue":N,"run":R,"task":T,"dispatch":D}  Orca reported the worker of dispatched
 #                                                        task T stopped without reporting, not yet nudged
+#   {"action":"retry","issue":N,"run":R,"task":T}        the agent of dispatched task T ended with outcome=failure and no
+#                                                        report (Orca raised no escalation), not yet retried
+#     ... stop ... ,"task":T,"agent_failed":true}        its retry's agent failed too: sf-act stops, with the agent's last output
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
 #   {"action":"abandon","issue":N,"run":R,"reason":S}    issue N closed before its live Run merged (no debrief)
 #   {"action":"cleanup","issue":N,"worktree":W}          closed issue N has no live Run, and W, a worktree the factory
@@ -238,6 +241,7 @@ def run_state:
         n: $i.number,
         attempts: ([$marks[] | select(.kind == "attempt")] | length),
         nudges: [$marks[] | select(.kind == "nudge")],
+        retries: [$marks[] | select(.kind == "retry")],
         ready: $is_ready,
         # Holds count on ready issues only.
         hold: (if $is_ready then $hold else null end),
@@ -284,10 +288,40 @@ def run_state:
         reason: "\($t.title) worker stopped without reporting, again after a nudge"}
       else empty end;
 
+  # The agent of a dispatched build, review or verify (the branch worktree of the issue) or debrief
+  # (its debrief worktree) ended with outcome=failure and no report: every agent there is done
+  # and one failed, so a live agent (the retry one) is never mistaken for it. Orca raises no
+  # escalation for a failed agent (#57), so `worktree ps` is the only witness. intake and plan
+  # run in the main checkout, which no worktree row names.
+  def agent_failed($c; $t):
+    ($t.title | split(" ")[0]) as $station
+    | (if $station == "debrief" then "debrief-\($name)-\($c.n)"
+       elif $station == "build" or $station == "review" or $station == "verify" then "\($name)-\($c.n)"
+       else null end) as $b
+    | $b != null and any($worktrees[0][];
+        .isMainWorktree != true and (.repo // "") == $name and .linkedIssue == $c.n
+        and ((.branch // "") | ltrimstr("refs/heads/")) == $b
+        and ((.agents // []) | length) > 0
+        and all(.agents[]; .mainAgent.state == "done") and any(.agents[]; .mainAgent.outcome == "failure"));
+
+  # A dispatched task whose agent failed without a report (no escalation to nudge on): retry it
+  # once (a retry marker names the task); failed again after the retry, stop. A retry gets 5
+  # minutes to show its new agent, so the old, failed one is not read as the retry failing.
+  def failure_actions($c; $r):
+    $r.tasks[] | select(.status == "dispatched") | . as $t
+    | select([($r.escalations // [])[] | select(.task == $t.id)] | length == 0)
+    | select(agent_failed($c; $t))
+    | ([$c.retries[] | select(.task == $t.id) | .at | epoch] | max) as $retried
+    | if $retried == null then {action: "retry", issue: $c.n, run: $r.id, task: $t.id}
+      elif now > $retried + 300 then {action: "stop", issue: $c.n, run: $r.id, task: $t.id, agent_failed: true,
+        reason: "\($t.title) agent ended with outcome=failure and no report, again after a retry"}
+      else empty end;
+
   def run_actions($c):
     $c.run as $r
     | if $r.state == "live" then
         nudge_actions($c; $r),
+        failure_actions($c; $r),
         ($r.tasks[] | select(.status == "ready")
         | if .title == "ship" then
             pr_for($c.n) as $pr

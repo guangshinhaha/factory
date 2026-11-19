@@ -244,6 +244,47 @@ test_a_worker_stopped_at_a_usage_limit_is_held_not_nudged() {
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 claude "
 }
 
+# agent_ended <outcome>: the agent in app-7's worktree ended its turn with that outcome (a state
+# `worktree ps` shows), and the task is still dispatched.
+agent_ended() {
+  sim_set '.agents = [{worktree: ($st.worktrees[] | select(.branch == "app-7") | .path), state: "done", outcome: $o}]' --arg o "$1" --argjson st "$(cat "$ORCA_SIM/state.json")"
+}
+retry_marker_at() { timeline "[$READY_EVENT,$(marker_comment "$(jq -cn --arg t "$(id_of review)" '{kind: "retry", task: $t}')" "$1")]"; }
+
+test_a_station_agent_that_failed_without_reporting_is_retried_once_then_stopped() {
+  world
+  to_review
+  first=$(dispatch_of review)
+  printf 'Codex could not finish this response.\n' > "$ORCA_SIM/terminal/$first"
+  agent_ended failure
+  acts
+  assert_contains "$(fake_stdin)" "\"kind\":\"retry\",\"task\":\"$(id_of review)\""
+  assert_eq dispatched "$(status_of review)" "review after the retry"
+  assert_eq 2 "$(sim --arg t "$(id_of review)" '[.dispatches[] | select(.task == $t)] | length')" "review dispatches"
+  assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
+  # The retried agent fails too: the retry marker is on the issue and past its grace.
+  retry_marker_at 2026-11-03T00:00:00Z
+  printf 'Codex could not finish this response again.\n' > "$ORCA_SIM/terminal/$(dispatch_of review)"
+  acts
+  assert_eq failed "$(status_of review)" "review"
+  assert_eq 2 "$(sim --arg t "$(id_of review)" '[.dispatches[] | select(.task == $t)] | length')" "review dispatches after the stop"
+  stop=$(grep '^sf-stop' "$FAKE_LOG")
+  assert_contains "$stop" "review agent ended with outcome=failure and no report, again after a retry"
+  assert_contains "$stop" "Codex could not finish this response again."
+  assert_contains "$stop" "ready"
+}
+
+test_a_station_agent_that_failed_at_a_usage_limit_is_held_not_retried() {
+  world
+  to_review
+  printf 'Codex usage limit reached. Try again at Dec 15th.\n' > "$ORCA_SIM/terminal/$(dispatch_of review)"
+  agent_ended failure
+  acts
+  assert_eq failed "$(status_of review)" "review"
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 codex "
+  assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
+}
+
 test_hold_results_hold_with_a_reset_and_stop_naming_a_dependency() {
   world
   acts

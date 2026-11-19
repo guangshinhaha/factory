@@ -742,6 +742,66 @@ test_closed_issue_live_run_in_a_rebase_round_is_abandoned() {
   assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
 }
 
+retry_marker() { comment "<!-- factory:{\\\"kind\\\":\\\"retry\\\",\\\"task\\\":\\\"$1\\\"} -->" "$2"; }
+# failed_agent_wt <branch>: the issue-7 worktree of that branch, whose only agent ended with outcome=failure.
+failed_agent_wt() { wt "/w/$1" "$1" 7 0 '[{"mainAgent":{"state":"done","outcome":"failure"}}]'; }
+
+test_station_agent_that_ended_with_failure_and_no_report_is_retried_once() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"review"}]'
+  worktrees "[$(failed_agent_wt app-7)]"
+  assert_eq '[{"action":"retry","issue":7,"run":"run_a","task":"t1"}]' "$(state)" "actions"
+}
+
+test_agent_failure_in_the_debrief_worktree_retries_only_the_debrief_task() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"debrief"}]'
+  worktrees "[$(failed_agent_wt app-7)]"
+  assert_eq '[]' "$(state)" "build worktree failed, debrief dispatched"
+  worktrees "[$(failed_agent_wt debrief-app-7)]"
+  assert_eq '[{"action":"retry","issue":7,"run":"run_a","task":"t1"}]' "$(state)" "debrief worktree failed"
+}
+
+test_agent_that_failed_again_after_the_retry_owes_a_stop_with_the_agent_flag() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(retry_marker t1 2026-11-02T01:05:00Z)]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"review"}]'
+  worktrees "[$(failed_agent_wt app-7)]"
+  assert_eq '[{"action":"stop","issue":7,"run":"run_a","task":"t1","agent_failed":true,"reason":"review agent ended with outcome=failure and no report, again after a retry"}]' "$(state)" "actions"
+}
+
+test_a_retry_started_moments_ago_gets_time_to_show_its_new_agent() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(retry_marker t1 "$(date -u +%Y-%m-%dT%H:%M:%SZ)")]"
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"review"}]'
+  worktrees "[$(failed_agent_wt app-7)]"
+  assert_eq '[]' "$(state)" "actions"
+}
+
+test_agent_failure_needs_every_agent_of_the_worktree_done() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"review"}]'
+  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"mainAgent":{"state":"done","outcome":"failure"}},{"mainAgent":{"state":"working"}}]')]"
+  assert_eq '[]' "$(state)" "another agent still working"
+  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"mainAgent":{"state":"done","outcome":"success"}}]')]"
+  assert_eq '[]' "$(state)" "agent succeeded"
+  worktrees "[$(wt /w/app-7 app-7 7)]"
+  assert_eq '[]' "$(state)" "no agent"
+}
+
 # ---- cleanup ---------------------------------------------------------------------------------
 
 test_cleanup_of_a_closed_issues_idle_factory_worktree() {
