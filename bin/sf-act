@@ -32,6 +32,9 @@
 # sf-hold; findings or FAIL in round 1 -> round 2; anything else -> sf-stop. sf-act marks a task
 # it gives up on `failed` with a `stop` result before calling sf-stop, so a failed sf-stop
 # leaves a dead Run that sf-state turns into the same stop next fire, never a new Run.
+# A build, review, verify or debrief agent that ended with outcome=failure and no report (Orca
+# raises no escalation) gets `retry` once (usage limit: hold), then a stop whose comment carries
+# its last output and how to rerun (#57).
 # An issue closed before its Run shipped gets `abandon`: its workers stopped, open tasks failed.
 # A stop or abandon closes the Run's terminals first (a stop keeps the worktree for triage); a
 # closed issue whose Run is over gets `cleanup`: its worktree and branch removed, never a dirty one.
@@ -261,11 +264,17 @@ provider_of() {
   pm=$(model_for "$1" 2> /dev/null) || pm=$(default_model "$1")
   echo "${pm%% *}"
 }
+# task_dispatch <task>: print the task's last dispatch (nothing when it has none), live or not.
+task_dispatch() { o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty'; }
 # limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
 limit_seen() {
-  ld=$(o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty')
+  ld=$(task_dispatch "$1")
   [ -n "$ld" ] || return 1
   o worker-read --dispatch "$ld" --source terminal --json 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
+}
+# last_output <dispatch>: the end of the worker's terminal on one line, for a stop comment.
+last_output() {
+  o worker-read --dispatch "$1" --source terminal --json 2> /dev/null | tail -c 600 | tr -d '\r' | tr -s '\n\t ' ' ' | sed 's/^ //;s/ $//'
 }
 
 # ---- launching workers -------------------------------------------------------------------------
@@ -736,6 +745,29 @@ act_nudge() {
     --json > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
 }
 
+# act_retry <run> <task>: the task's agent ended with outcome=failure and no report (#57). At a
+# usage limit, hold; else mark the retry (marker first, so a failed retry is never repeated), fence
+# the old worker, and run the task again.
+act_retry() {
+  run=$1 t=$2
+  load "$run" || return 1
+  [ "$(tfield "$t" status)" = dispatched ] || return 0
+  title=$(title_of "$t")
+  st=$(station_of "$title")
+  bind "$run" || return 1
+  if limit_seen "$t"; then
+    hold_task "$t" "$st" "$(provider_of "$st")" "$(in_an_hour)" "$title agent stopped at a usage limit"
+    return
+  fi
+  printf 'factory: the %s agent ended with outcome=failure and no report; running it again once.\n\n<!-- factory:{"kind":"retry","task":"%s"} -->\n' "$title" "$t" | comment || return 1
+  if lw=$(live_worker "$t"); then
+    [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
+    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+  fi
+  o task-update --id "$t" --status ready --json > /dev/null 2> "$tmp/err" || { log "task $t not set ready: $(first "$tmp/err")"; return 1; }
+  act_advance "$run" "$t"
+}
+
 # act_abandon <run> <reason>: the issue closed before ship: stop the Run's workers, then fail its
 # open tasks, so the Run is dead and frees its slot. A worker Orca can't account for is left for
 # the next fire, so no worker outlives the abandon.
@@ -775,7 +807,7 @@ act_cleanup() {
   log "#$issue: removed worktree $w"
 }
 
-# act_stop <reason> [run task [dispatch]]
+# act_stop <reason> [run task [dispatch [agent_failed]]]
 act_stop() {
   reason=$1
   [ -n "${2:-}" ] || { stop_now "$reason" >&2; return; }
@@ -783,6 +815,18 @@ act_stop() {
   load "$run" || return 1
   title=$(title_of "$t")
   st=$(station_of "$title")
+  if [ -n "${5:-}" ]; then
+    # The agent failed twice with no report: say what it last printed and how to rerun.
+    bind "$run" || return 1
+    ld=$(task_dispatch "$t")
+    out=''
+    if [ -n "$ld" ]; then
+      out=$(last_output "$ld")
+      o worker-stop --dispatch "$ld" --json > /dev/null 2>&1 || log "worker of dispatch $ld not stopped"
+    fi
+    give_up "$t" "$st" "$reason. Last output: ${out:-none}. To rerun, label the issue ready again."
+    return
+  fi
   if [ -n "${4:-}" ]; then
     bind "$run" || return 1
     o worker-stop --dispatch "$4" --json > /dev/null 2>&1 || log "worker of dispatch $4 not stopped"
@@ -900,10 +944,11 @@ while [ $pass -lt 4 ]; do
       advance) act_advance "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
       ship) act_ship "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .pr)" || arc=$? ;;
       restart) act_restart "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
+      retry) act_retry "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
       nudge) act_nudge "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
       cleanup) act_cleanup "$(rget "$a" .worktree)" || arc=$? ;;
       abandon) act_abandon "$(rget "$a" .run)" "$(rget "$a" .reason)" || arc=$? ;;
-      stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
+      stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" "$(rget "$a" .agent_failed)" || arc=$? ;;
       *) log "unknown action: $a"; arc=1 ;;
     esac
     [ $arc -eq 0 ] || { trace "action failed: $a"; log "action failed: $a"; exit_status=1; }
