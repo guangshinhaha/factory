@@ -773,6 +773,17 @@ test_cleanup_does_not_wait_for_idle_terminals_only_for_an_agent() {
   assert_eq '[]' "$(state)" "terminals and an agent"
 }
 
+test_cleanup_keeps_a_worktree_whose_branch_has_an_open_pr() {
+  world
+  runs "[$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"completed","title":"lessons"}]'
+  worktrees "[$(wt /w/app-7 app-7 7 0), $(wt /w/debrief-app-7 debrief-app-7 7 1)]"
+  prs '[{"number":70,"headRefName":"debrief-app-7"}]'
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"}]' "$(state)" "docs PR open"
+  prs '[]'
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "docs PR merged"
+}
+
 test_cleanup_follows_a_finished_run_of_a_closed_issue() {
   world
   runs "[$(run_json run_a 7)]"
