@@ -35,7 +35,7 @@
 # A build, review, verify or debrief agent that ended with outcome=failure and no report (Orca
 # raises no escalation) gets `retry` once (usage limit: hold), then a stop whose comment carries
 # its last output and how to rerun (#57).
-# An issue closed before its Run shipped gets `abandon`: its workers stopped, open tasks failed.
+# An issue closed before its Run merged (no debrief or lessons task) gets `abandon`: its workers stopped, open tasks failed.
 # A stop or abandon closes the Run's terminals first (a stop keeps the worktree for triage); a
 # closed issue whose Run is over gets `cleanup`: its worktree and branch removed, never a dirty one.
 #
@@ -119,7 +119,7 @@ bind() { o run-use --id "$1" --json > /dev/null 2> "$tmp/err" || { log "Run $1 n
 # load <run>: the Run's tasks, in full, into $tmp/tasks.json.
 load() {
   o task-list --run "$1" --json --full > "$tmp/tasks.json" 2> "$tmp/err" || { log "tasks of Run $1 not listed: $(first "$tmp/err")"; return 1; }
-  jq -e '.ok == true and (.result.tasks | type == "array")' "$tmp/tasks.json" > /dev/null 2>&1 \
+  jq -se 'length == 1 and (.[0] | .ok == true and (.result.tasks | type == "array"))' "$tmp/tasks.json" > /dev/null 2>&1 \
     || { log "tasks of Run $1 not listed: task-list printed no task array"; return 1; }
 }
 tfield() { jq -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
@@ -643,7 +643,7 @@ step_lessons() {
   printf '%s\n' "$dj" | jq -c --arg r "$repo" --arg n "$name" '.lessons // [] | .[]
     | select((.file | type) == "string" and (.what | type) == "string")
     | select((.file | length) <= 200 and (.what | length) <= 600 and (.file | length) > 0 and (.what | length) > 0)
-    | select(([.file, .what] | join(" ") | ascii_downcase) as $t | ($t | contains($r | ascii_downcase) | not) and ($t | contains($n | ascii_downcase) | not))' \
+    | select(([.file, .what] | join(" ") | ascii_downcase) as $t | ($t | contains($r | ascii_downcase) | not) and ($t | test("(^|[^a-z0-9])" + ($n | ascii_downcase | gsub("\\."; "\\.")) + "($|[^a-z0-9])") | not))' \
     > "$tmp/lessons" || return 1
   if [ -s "$tmp/lessons" ]; then
     gh issue list -R "$SHINSTACK_REPO" --state all --limit 1000 --json title -q '.[].title' > "$tmp/titles" 2> "$tmp/err" \
@@ -779,7 +779,7 @@ act_retry() {
   act_advance "$run" "$t"
 }
 
-# act_abandon <run> <reason>: the issue closed before ship: stop the Run's workers, then fail its
+# act_abandon <run> <reason>: the issue closed before merge: stop the Run's workers, then fail its
 # open tasks, so the Run is dead and frees its slot. A worker Orca can't account for is left for
 # the next fire, so no worker outlives the abandon.
 act_abandon() {

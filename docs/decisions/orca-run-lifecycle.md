@@ -89,4 +89,4 @@ Workers get Orca's environment, not the caller's. The role has to travel in the 
 
 ## Not tested
 - Orca restart mid-Run (Runs survived session exit; app restart not exercised).
-- `sf-act` terminals racing each other on the same Run (the `mkdir` lock in `sf-tick` should prevent it).
+- `sf-act` terminals racing each other on the same Run (the lock dir in `sf-tick`, claimed with an O_EXCL `tick` file inside it, should prevent it).

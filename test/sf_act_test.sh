@@ -356,13 +356,16 @@ test_merged_pr_runs_debrief_on_a_fresh_branch_then_files_lessons() {
   fixture gh pr create -R "$REPO" --head debrief-app-7 --base main --title "docs: debrief notes from #7" --body-file - < /dev/null
   printf 'friction: playbooks/old.md: already filed\n' | fixture gh issue list -R guangshinhaha/shinstack --state all --limit 1000 --json title -q '.[].title'
   fixture gh issue create -R guangshinhaha/shinstack -l friction --title "friction: playbooks/bug-fix.md: step 3 is unclear" --body-file - < /dev/null
+  fixture gh issue create -R guangshinhaha/shinstack -l friction --title "friction: w.md: apply the happy path first" --body-file - < /dev/null
   long=$(printf '%0700d' 0)
-  finish debrief "$(printf 'notes\nfactory-result: {"station":"debrief","status":"debriefed","lessons":[{"file":"playbooks/bug-fix.md","what":"step 3 is unclear"},{"file":"playbooks/old.md","what":"already filed"},{"file":"x.md","what":"acme/app leaks"},{"file":"y.md","what":"the app repo is named"},{"file":"z.md","what":"%s"}]}' "$long")"
+  finish debrief "$(printf 'notes\nfactory-result: {"station":"debrief","status":"debriefed","lessons":[{"file":"w.md","what":"apply the happy path first"},{"file":"playbooks/bug-fix.md","what":"step 3 is unclear"},{"file":"playbooks/old.md","what":"already filed"},{"file":"x.md","what":"acme/app leaks"},{"file":"y.md","what":"the app repo is named"},{"file":"z.md","what":"%s"}]}' "$long")"
   acts
   assert_eq completed "$(status_of lessons)" "lessons"
   assert_called "gh pr create -R acme/app --head debrief-app-7 --base main --title docs: debrief notes from #7 --body-file -"
-  assert_eq 1 "$(count_calls 'gh issue create')" "friction issues filed"
+  # A short repo name inside another word ("apply" holds "app") is no leak; the repo named alone is.
+  assert_eq 2 "$(count_calls 'gh issue create')" "friction issues filed"
   assert_called "gh issue create -R guangshinhaha/shinstack -l friction --title friction: playbooks/bug-fix.md: step 3 is unclear --body-file -"
+  assert_called "gh issue create -R guangshinhaha/shinstack -l friction --title friction: w.md: apply the happy path first --body-file -"
 }
 
 test_ship_stop_fails_the_ship_task_and_a_rebase_queues_a_new_review() {
@@ -476,6 +479,17 @@ test_a_lock_taken_over_while_acting_is_not_removed_on_exit() {
   sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" > /dev/null 2>&1 || :
   [ -d "$TEST_TMP/lock" ] || fail "the new holder's lock was removed"
   assert_eq 999999 "$(cat "$TEST_TMP/lock/pid")" "pid in the lock"
+}
+
+# sf-act reads a Run's tasks whole: a stray document before the real one is a failed read, as in sf-state.
+test_a_task_list_with_a_second_document_is_not_trusted() {
+  world
+  acts
+  finish intake "$GO"
+  printf '#!/bin/sh\ncase " $* " in *" task-list "*" --full "*) echo '"'"'{"ok":false}'"'"' ;; esac\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "not listed: task-list printed no task array"
 }
 
 # Seen in the e2e: a worker ends its body's only line with the result instead of a line of its own.
