@@ -641,6 +641,103 @@ test_task_list_with_a_bad_document_before_a_good_one_is_an_error() {
   fails_with "sf-state: tasks of Run run_a not listed"
 }
 
+# 39: field-level shape of each valid document.
+issue_numbers_fail() {
+  world
+  printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body
+  fails_with "sf-state: open issues not listed: an issue number is not a whole number"
+}
+
+test_issue_without_a_number_is_an_error() {
+  issue_numbers_fail '[{"labels":[{"name":"ready"}],"body":""}]'
+}
+
+test_issue_with_a_string_number_is_an_error() {
+  issue_numbers_fail '[{"number":"7","labels":[{"name":"ready"}],"body":""}]'
+}
+
+test_issue_with_a_fractional_number_is_an_error() {
+  issue_numbers_fail '[{"number":7.5,"labels":[{"name":"ready"}],"body":""}]'
+}
+
+test_issue_with_a_nan_number_is_an_error() {
+  issue_numbers_fail '[{"number":NaN,"labels":[{"name":"ready"}],"body":""}]'
+}
+
+test_duplicate_issue_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7),$(ready_issue_json 7)]"
+  readied 7
+  fails_with "sf-state: open issues not listed: issue #7 is listed twice"
+}
+
+test_pr_with_a_nan_number_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  echo '[{"number":NaN,"headRefName":"app-7","isCrossRepository":false}]' | prs_raw
+  fails_with "sf-state: open PRs not listed"
+}
+
+test_pr_with_a_huge_number_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  echo '[{"number":1e1000,"headRefName":"app-7","isCrossRepository":false}]' | prs_raw
+  fails_with "sf-state: open PRs not listed"
+}
+
+test_run_list_with_a_false_next_cursor_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":false}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  fails_with "sf-state: Orca Runs not listed: nextCursor is not a string"
+}
+
+test_run_list_with_a_number_next_cursor_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[],"nextCursor":2}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  fails_with "sf-state: Orca Runs not listed: nextCursor is not a string"
+}
+
+test_run_list_with_a_duplicate_run_id_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  runs "[$(run_json run_a 7),$(run_json run_a 7)]"
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  fails_with "sf-state: Orca Runs not listed: Run id run_a is listed twice"
+}
+
+test_run_list_with_a_duplicate_run_id_across_pages_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  printf '{"ok":true,"result":{"runs":[%s],"nextCursor":"c2"}}\n' "$(run_json run_a 7)" \
+    | fixture orca orchestration run-list --json --full --limit 100
+  printf '{"ok":true,"result":{"runs":[%s]}}\n' "$(run_json run_a 7)" \
+    | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
+  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
+  fails_with "sf-state: Orca Runs not listed: Run id run_a is listed twice"
+}
+
+test_timeline_with_a_null_event_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},null]'
+  fails_with "sf-state: timeline of #7 has an event that is not an object"
+}
+
+test_comment_without_a_utc_time_is_an_error() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment "$attempt" 7),$(comment "$attempt" 7),$(comment "$attempt" 7)]"
+  fails_with "sf-state: timeline of #7 has a comment with no UTC time"
+}
+
 nudge_marker() { comment "<!-- factory:{\\\"kind\\\":\\\"nudge\\\",\\\"dispatch\\\":\\\"$1\\\"} -->" "$2"; }
 
 test_worker_stopped_without_reporting_is_nudged_once() {
