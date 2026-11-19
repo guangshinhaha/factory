@@ -977,3 +977,26 @@ test_a_worktree_read_that_fails_prints_nothing() {
   assert_eq 1 "$status" "exit status on a bad list"
   assert_eq '' "$out" "stdout on a bad list"
 }
+
+test_release_path_starts_only_listed_unblocked_issues_in_list_order() {
+  world
+  printf 'factory-concurrency: 5\nfactory-release-path: #90\n' > CLAUDE.md
+  # #90 is the path: 12, 5, 8 (needs open #20, off-list), 9 (listed twice later), in that order.
+  issues "[$(ready_issue_json 5), $(ready_issue_json 8 'Depends on #20'), $(ready_issue_json 12), $(ready_issue_json 30), $(ready_issue_json 31),
+    {\"number\":20,\"labels\":[],\"body\":\"\"}, {\"number\":90,\"labels\":[],\"body\":\"Path:\\n1. #12\\n2. #5\\n3. #8\\n4. #12\"}]"
+  for n in 5 8 12 30 31; do readied $n; done
+  assert_eq '[{"action":"start","issue":5},{"action":"hold","issue":8,"reason":"depends on open #20"},{"action":"start","issue":12}]' \
+    "$(state)" "actions"
+  # List order, not issue number: with capacity 1 the first listed issue (12) starts, not 5.
+  printf 'factory-concurrency: 1\nfactory-release-path: #90\n' > CLAUDE.md
+  assert_eq '[{"action":"hold","issue":8,"reason":"depends on open #20"},{"action":"start","issue":12}]' "$(state)" "actions at capacity 1"
+}
+
+test_release_path_issue_closed_changes_nothing() {
+  world
+  printf 'factory-concurrency: 5\nfactory-release-path: #90\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5), $(ready_issue_json 30)]"
+  readied 5
+  readied 30
+  assert_eq '[{"action":"start","issue":5},{"action":"start","issue":30}]' "$(state)" "actions"
+}
