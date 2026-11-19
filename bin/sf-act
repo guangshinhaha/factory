@@ -245,7 +245,12 @@ close_terminals() {
 }
 # stop_now <reason>: sf-stop, after the Run's terminals are closed. A stopped issue keeps its
 # worktree for triage, but no live worker.
-stop_now() { close_terminals || return 1; sf-stop --repo "$repo" "$issue" "$@"; }
+# The PR (when the branch has one open) goes to sf-stop so the stop comment can say what it changes.
+stop_now() {
+  close_terminals || return 1
+  sn_pr=$(open_pr "$(branch)" 2> /dev/null) || sn_pr=
+  if [ -n "$sn_pr" ]; then sf-stop --repo "$repo" --pr "$sn_pr" "$issue" "$@"; else sf-stop --repo "$repo" "$issue" "$@"; fi
+}
 
 # give_up <task> <station> <reason>: mark the task failed with a stop result, then sf-stop.
 give_up() {

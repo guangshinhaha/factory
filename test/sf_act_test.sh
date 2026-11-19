@@ -382,7 +382,7 @@ test_ship_stop_fails_the_ship_task_and_a_rebase_queues_a_new_review() {
   finish verify "$VERIFIED"
   acts
   assert_eq failed "$(status_of ship)" "second ship"
-  assert_called "sf-stop --repo acme/app 7 ship: checks failed"
+  assert_called "sf-stop --repo acme/app --pr 12 7 ship: checks failed"
 }
 
 test_lock_holds_the_pid_while_acting_and_is_removed_on_exit() {
