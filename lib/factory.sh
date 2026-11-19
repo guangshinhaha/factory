@@ -41,6 +41,8 @@ is_number() {
   esac
 }
 
+# Only a comment's final non-empty line is read as a marker: every factory comment ends with its
+# marker, so a marker copied into the middle of a comment's text never counts.
 # markers_since_ready <repo> <issue>: print a JSON array of the issue's factory marker objects
 # (<!-- factory:{"kind":...} -->) from OWNER/MEMBER/COLLABORATOR comments made after the last
 # `ready` label event, oldest first. sf-state reads markers the same way.
@@ -52,7 +54,8 @@ markers_since_ready() {
     | ([.[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
     | [.[] | select(.event == "commented" and .created_at > $since
           and ((.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a)))
-        | (.body // "") | scan("<!-- factory:(\\{.*?\\}) -->") | .[0] | (try fromjson catch empty)]
+        | (.body // "" | split("\n") | map(rtrimstr("\r") | select(test("\\S"))) | last // "")
+        | scan("^<!-- factory:(\\{.*\\}) -->$") | .[0] | (try fromjson catch empty)]
   ' 2> /dev/null || return 1
 }
 
@@ -68,7 +71,16 @@ markers_since_ready() {
 # shows a file count, no names. Whatever else is in the text, `<!--` never leaves this function, so
 # markers_since_ready can never read a marker out of it. Callers append their own marker after it.
 ask_body() {
-  ask_body_text "$@" | sed 's/<!--/\&lt;!--/g'
+  ab_h=$(defuse "$3")
+  ab_w=$(defuse "$4")
+  ask_body_text "$1" "$2" "$ab_h" "$ab_w" "${5:-}" | sed 's/<!--/\&lt;!--/g'
+}
+
+# defuse <text>: one line of untrusted text made inert in a comment: newlines become spaces, `<`
+# becomes &lt; (no HTML, no `<!--`, no autolink), `@` becomes &#64; (no mention) and `[` becomes
+# \[ (no Markdown link; `]` too). The text still reads the same when rendered.
+defuse() {
+  printf '%s' "$1" | tr '\n\r' '  ' | sed -e 's/</\&lt;/g' -e 's/@/\&#64;/g' -e 's/\[/\\[/g' -e 's/\]/\&#93;/g'
 }
 
 # ask_body_text: ask_body before the `<!--` guard.
@@ -116,7 +128,7 @@ ask_body_text() {
     printf '**What this changes:** unknown: there is no PR yet.\n'
   elif [ "$ab_fork" != no ] && [ -n "$ab_nfiles" ]; then
     if [ "$ab_fork" = yes ]; then ab_from='is from a fork'; else ab_from='is not confirmed to be from this repo'; fi
-    printf '**What this changes:** PR #%s %s and changes %s files; read them with `gh pr diff %s -R %s`. Whether anything runs it yet is not known to the factory.\n' "$ab_pr" "$ab_from" "$ab_nfiles" "$ab_pr" "$ab_repo"
+    printf '**What this changes:** PR #%s %s and changes %s files; read them with `gh pr diff %s -R %s`. The factory never pushes to a fork branch, so a human must make any change to it. Whether anything runs it yet is not known to the factory.\n' "$ab_pr" "$ab_from" "$ab_nfiles" "$ab_pr" "$ab_repo"
   elif [ -n "$ab_files" ]; then
     printf '**What this changes:** PR #%s touches: %s. Whether anything runs it yet is not known to the factory.\n' "$ab_pr" "$ab_files"
   else
