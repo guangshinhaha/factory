@@ -330,6 +330,22 @@ test_target_repo_hooks_do_not_block_setup() {
   done
 }
 
+# A headless Orca run has no signing agent, so a repo or global commit.gpgSign=true would fail the
+# commit. The PR's CI is the gate; the commit goes unsigned.
+test_commit_gpgsign_does_not_block_setup() {
+  world
+  printf '#!/bin/sh\necho signer >> "%s"\necho "gpg: no agent" >&2\nexit 1\n' "$TEST_TMP/gpg-ran" > "$TEST_TMP/gpg"
+  chmod +x "$TEST_TMP/gpg"
+  git -C "$WS" config commit.gpgSign true
+  git -C "$WS" config gpg.program "$TEST_TMP/gpg"
+  status=0
+  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_eq "" "$(cat "$TEST_TMP/gpg-ran" 2> /dev/null)" "signer runs"
+  assert_eq 1 "$(count_calls "gh pr create")" "PRs"
+  assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
+}
+
 # An outsider's fork can open a PR from a branch named factory-init too.
 test_fork_pr_from_factory_init_is_not_the_setup_pr() {
   world
