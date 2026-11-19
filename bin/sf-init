@@ -142,10 +142,12 @@ trap 'exit 1' HUP INT TERM
 # The repo's hooks need its deps (node_modules and the like), which the temporary worktree lacks,
 # so they would fail every run. The only commit is the factory lines written here, and it lands
 # through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks, and
-# without core.fsmonitor, a program from the repo's config that runs like one.
+# without core.fsmonitor, a program from the repo's config that runs like one. The commit is also
+# unsigned: a headless Orca run has no signing agent, so commit.gpgSign=true would fail it. Clean and
+# smudge filters (LFS) stay on: they can matter for correctness, and no failure shows they must go.
 nohooks=$tmp/no-hooks
 mkdir "$nohooks" || die "temp dir not created"
-quiet_git() { git -c core.hooksPath="$nohooks" -c core.fsmonitor=false "$@"; }
+quiet_git() { git -c core.hooksPath="$nohooks" -c core.fsmonitor=false -c commit.gpgSign=false "$@"; }
 
 quiet_git -C "$ws" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" \
   || die "origin/$default not fetched in $ws (git fetch failed)"
