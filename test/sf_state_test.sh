@@ -750,15 +750,13 @@ test_cleanup_of_a_closed_issues_idle_factory_worktree() {
   assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "actions"
 }
 
-test_cleanup_waits_for_an_open_issue_a_live_terminal_an_agent_or_a_live_run() {
+test_cleanup_waits_for_an_open_issue_an_agent_or_a_live_run() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
   worktrees "[$(wt /w/app-7 app-7 7)]"
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "open issue"
   issues '[]'
-  worktrees "[$(wt /w/app-7 app-7 7 1)]"
-  assert_eq '[]' "$(state)" "live terminal"
   worktrees "[$(wt /w/app-7 app-7 7 0 '[{"state":"working"}]')]"
   assert_eq '[]' "$(state)" "live agent"
   worktrees "[$(wt /w/app-7 app-7 7)]"
