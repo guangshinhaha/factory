@@ -13,6 +13,8 @@
 #     `gantry-verdict-check --no-label`: every PR needs a PASS verdict at its head, whatever its labels. Gate exit 1 stops; exit 2 is retried next fire.
 #     Then a review must have run at the head: a trusted PR comment naming the head with `Covered:`
 #     and `Findings:` lines, or `Codex review not run: <reason>`. None: stop.
+#     `consult-shin` on the issue (a station made a call for the owner): PARKED, checked again just
+#     before the merge; only a person removes the label.
 #  4. Mode from CLAUDE.md on origin/<base> (never the PR's own copy, which could flip itself to
 #     auto): `shinstack-mode: auto` merges, unless `shinstack-mode.merge: ask`;
 #     `shinstack-mode.merge: auto` merges in any mode. Otherwise: `gh pr ready`, exit 0.
@@ -152,6 +154,17 @@ git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: 
 claude_md=$(git show "origin/$base:CLAUDE.md" 2> /dev/null) || claude_md=
 mode=$(printf '%s\n' "$claude_md" | sed -n 's/^[[:space:]]*shinstack-mode:[[:space:]]*\([a-z]*\)[[:space:]]*$/\1/p' | head -n 1)
 merge_mode=$(printf '%s\n' "$claude_md" | sed -n 's/^[[:space:]]*shinstack-mode\.merge:[[:space:]]*\([a-z]*\)[[:space:]]*$/\1/p' | head -n 1)
+# consult-shin (#36): a station made a call for the owner. Parked, never stopped, and never merged,
+# until a person removes the label. Any such label holds, whatever the worker called it.
+consult_held() {
+  case ",$1," in *,consult-shin,*) return 0 ;; esac
+  return 1
+}
+if consult_held "$labels"; then
+  echo "$me: #$issue is labelled consult-shin: PR #$pr left for the owner until the label is removed"
+  echo "PARKED"
+  exit 0
+fi
 auto_merge=0
 if [ "$merge_mode" = auto ] || { [ "$mode" = auto ] && [ "$merge_mode" != ask ]; }; then
   auto_merge=1
@@ -276,6 +289,13 @@ rebase_once() {
 reran=0
 while :; do
   wait_mergeable || rebase_once
+  labels=$(gh issue view "$issue" -R "$repo" --json labels -q '[.labels[].name] | join(",")') \
+    || retry "labels of #$issue not read (gh issue view failed)"
+  if consult_held "$labels"; then
+    echo "$me: #$issue was labelled consult-shin during ship: PR #$pr left for the owner until the label is removed"
+    echo "PARKED"
+    exit 0
+  fi
   status=0
   gh pr merge "$pr" -R "$repo" --squash --match-head-commit "$start_head" > "$tmp/merge" 2>&1 || status=$?
   refusal=$(tr '\n' ' ' < "$tmp/merge")

@@ -1034,3 +1034,12 @@ test_release_path_issue_closed_changes_nothing() {
   readied 30
   assert_eq '[{"action":"start","issue":5},{"action":"start","issue":30}]' "$(state)" "actions"
 }
+
+test_a_consult_marker_changes_no_action() {
+  world
+  issues "[$(ready_issue_json 7)]"
+  timeline 7 "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"2026-11-01T00:00:00Z\"},$(comment '<!-- factory:{\"kind\":\"consult\",\"id\":\"1\"} -->' 2026-11-01T00:01:00Z)]"
+  readied 7
+  runs "[]"
+  assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
+}
