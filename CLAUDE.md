@@ -26,6 +26,12 @@ Hooks and CI come from gantry (`lefthook.yml`, `.github/workflows/ci.yml`).
 A task is done only when the pre-push checks pass. Never use `--no-verify`.
 Merge only with `gh pr merge --squash --match-head-commit <sha>`. If gh refuses, stop and report the refusal: the REST merge endpoint silently uses the admin bypass (PR #16).
 
+## Releases
+
+- Claude Code updates the installed plugin only when `version` in `.claude-plugin/plugin.json` changes, so a merge that changes `bin/`, `skills/` or `lib/` does not reach other repos until the version is bumped.
+- Bump `version` (semver: minor for a new capability, patch for a fix) in the PR that finishes a milestone, or in a `chore: release x.y.z` PR right after it. Do it without being asked.
+- The `factory` marketplace has `autoUpdate` on in `~/.claude/settings.json`: a bumped version on `main` is picked up unattended. Never bump on a branch with an unverified gate script.
+
 ## Coding
 
 - Cross-platform (macOS/Windows/Linux): POSIX sh only, no bash 4+ features.
