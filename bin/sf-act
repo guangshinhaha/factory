@@ -265,6 +265,47 @@ post_timeline() {
   printf 'factory: run timeline (UTC). "+" is the time since the previous stage began: that stage'"'"'s run plus any wait for the next sf-tick.\n\n%s\n\n<!-- factory:{"kind":"timeline"} -->\n' "$pt_lines" | comment || return 0
 }
 
+# ---- consult-shin (#36) ---------------------------------------------------------------------------
+
+# consult_field <text>: one worker-written field made safe to post: trimmed, defused (no mention,
+# link, HTML or marker), a bare URL's `://` broken so it cannot autolink, cut to 300 bytes.
+consult_field() {
+  printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-300 | { read -r cf_l || :; defuse "$cf_l"; } | sed 's#://#:\&\#47;\&\#47;#g'
+}
+
+# consult_lift <task> <station>: lift `consult-shin: question | options | pick | why | confidence |
+# undo | source` lines from the task's worker report and post each on the issue as a provisional
+# decision, then hold the merge: label `consult-shin` (created if missing; sf-ship parks while it
+# is on the issue, and only a person removes it). Nothing is copied raw. Each comment ends with a
+# `consult` marker holding the line's cksum, so a rerun posts a line once; the marker is read only
+# from trusted comments (markers_since_ready), and sf-state ignores the kind. Returns 1, with the
+# reason on stderr, when the label or a comment can't be written: the caller must not go on to a
+# ship that would not see the hold.
+# shellcheck disable=SC2016 # backticks in the posted text are Markdown
+consult_lift() {
+  cl_lines=$(body_of "$1" | sed -n 's/^[[:space:]]*consult-shin:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p')
+  [ -n "$cl_lines" ] || return 0
+  gh label create consult-shin -R "$repo" --force --description "factory: a station made a call for the owner; ship holds until the label is removed" --color FBCA04 > /dev/null 2> "$tmp/err" \
+    || { log "#$issue: label consult-shin not created: $(first "$tmp/err")"; return 1; }
+  gh issue edit "$issue" -R "$repo" --add-label consult-shin > /dev/null 2> "$tmp/err" \
+    || { log "#$issue: label consult-shin not added: $(first "$tmp/err")"; return 1; }
+  cl_marks=$(markers_since_ready "$repo" "$issue") || { log "#$issue: consult-shin lines not posted: timeline not read"; return 1; }
+  printf '%s\n' "$cl_lines" > "$tmp/consult"
+  while IFS= read -r cl_line <&4; do
+    cl_id=$(printf '%s' "$cl_line" | cksum | cut -d' ' -f1)
+    if printf '%s\n' "$cl_marks" | jq -e --arg id "$cl_id" 'any(.[]; .kind == "consult" and .id == $id)' > /dev/null 2>&1; then continue; fi
+    IFS='|' read -r cl_q cl_o cl_p cl_w cl_c cl_u cl_s <<CONSULT
+$cl_line
+CONSULT
+    {
+      printf 'factory: consult-shin (provisional). The %s station made this call for you. The issue is labelled `consult-shin` and the factory will not merge until you review it and remove the label.\n\n' "$2"
+      printf -- '- **Question:** %s\n- **Options:** %s\n- **Pick:** %s\n- **Why:** %s\n- **Confidence:** %s\n- **Undo:** %s\n- **Source:** %s\n' \
+        "$(consult_field "$cl_q")" "$(consult_field "$cl_o")" "$(consult_field "$cl_p")" "$(consult_field "$cl_w")" "$(consult_field "$cl_c")" "$(consult_field "$cl_u")" "$(consult_field "$cl_s")"
+      printf '\n<!-- factory:{"kind":"consult","id":"%s"} -->\n' "$cl_id"
+    } | comment || return 1
+  done 4< "$tmp/consult"
+}
+
 # ---- giving up -------------------------------------------------------------------------------
 
 # close_terminals_of <worktree path>: close every live terminal in that worktree. Idempotent; a
@@ -503,6 +544,7 @@ need_result() {
       ;;
   esac
   ok_status "$2" "$rs" || { echo "$2 completed with status [$rs]"; return 1; }
+  consult_lift "$1" "$2" > /dev/null || { echo "$2 consult-shin lines not posted or not labelled (see the log)"; return 1; }
   printf '%s\n' "$rj"
 }
 

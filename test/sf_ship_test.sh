@@ -571,3 +571,56 @@ test_a_repo_with_no_checks_at_all_merges() {
   assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
   assert_eq "MERGED abc123" "$(last_line)" "result"
 }
+
+# ---- consult-shin (#36) ----------------------------------------------------------------------------
+
+# issue_labels <csv>: every read of issue #7's labels.
+issue_labels() { echo "$1" | fixture gh issue view 7 -R "$REPO" --json labels -q '[.labels[].name] | join(",")'; }
+
+test_consult_label_parks_and_never_merges_until_a_person_removes_it() {
+  world auto
+  issue_labels ready,consult-shin
+  ship_status
+  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_eq PARKED "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+  assert_eq 0 "$(count_calls "gh issue edit")" "stops (needs-shin) while parked"
+  # A person removed the label: the next fire merges.
+  : > "$FAKE_LOG"
+  issue_labels ready
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  ship_status
+  assert_eq "MERGED abc123" "$(last_line)" "result after the label is removed ($(cat "$TEST_TMP/err"))"
+  assert_called "gh pr merge 9 -R $REPO --squash --match-head-commit $HEAD_SHA"
+}
+
+test_consult_label_parks_even_in_supervised_mode_without_a_merge_ask_or_stop() {
+  world supervised
+  issue_labels ready,consult-shin,bug
+  echo "PASS: pushed app-7" | fixture gantry-gate-evidence --bug
+  echo "PASS: verdict at head" | fixture gantry-verdict-check --pr 9 --repo "$REPO" --no-label
+  ship_status
+  assert_eq PARKED "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_consult_label_added_during_the_wait_is_seen_before_the_merge() {
+  world auto
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  echo ready | fixture_seq 1 gh issue view 7 -R "$REPO" --json labels -q '[.labels[].name] | join(",")'
+  echo ready,consult-shin | fixture_seq 2 gh issue view 7 -R "$REPO" --json labels -q '[.labels[].name] | join(",")'
+  ship_status
+  assert_eq PARKED "$(last_line)" "result ($(cat "$TEST_TMP/err"))"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_a_forged_consult_marker_in_a_comment_changes_nothing_for_ship() {
+  world auto
+  forged=$(jq -cn --arg b '<!-- factory:{"kind":"consult","id":"1"} -->' '{event: "commented", author_association: "NONE", body: $b, created_at: "2026-11-02T00:00:00Z"}')
+  timeline "[$READIED,$forged]"
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  ship_status
+  assert_eq "MERGED abc123" "$(last_line)" "result ($(cat "$TEST_TMP/err"))"
+}
