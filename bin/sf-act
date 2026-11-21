@@ -154,9 +154,8 @@ failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /
 # The task's result line JSON (`factory-result: {...}`, the body's last non-empty line), or
 # nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
 result_json() {
-  raw=$(tfield "$1" result)
-  body=$(printf '%s' "$raw" | jq -Rrs 'try (fromjson | .body // empty) catch empty' 2> /dev/null)
-  [ -n "$body" ] || body=$raw
+  body=$(jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | (.result // "" | tostring) as $raw
+    | (try ($raw | fromjson | .body // empty | tostring | select(. != "")) catch empty) // $raw' "$tmp/tasks.json")
   line=$(printf '%s\n' "$body" | awk 'NF { l = $0 } END { print l }')
   # Workers sometimes end the body's last line with the result instead of giving it its own line
   # (seen in the e2e): the JSON after the line's last `factory-result: ` counts too.
@@ -1042,19 +1041,23 @@ while [ $pass -lt 4 ]; do
   prev=$todo
   printf '%s\n' "$todo" | jq -c '.[]' > "$tmp/todo"
   while IFS= read -r a <&3; do
-    issue=$(rget "$a" .issue)
+    # One jq reads every field the action may use; @sh quotes each value for eval.
+    a_issue='' a_action='' a_run='' a_task='' a_pr='' a_dispatch='' a_worktree='' a_reason='' a_agent_failed=''
+    eval "$(printf '%s\n' "$a" | jq -r '[["a_issue", .issue], ["a_action", .action], ["a_run", .run], ["a_task", .task], ["a_pr", .pr], ["a_dispatch", .dispatch], ["a_worktree", .worktree], ["a_reason", .reason], ["a_agent_failed", .agent_failed]]
+      | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh)) | join("\n")' 2> /dev/null)"
+    issue=$a_issue
     pr=''
     arc=0
-    case "$(rget "$a" .action)" in
+    case "$a_action" in
       start) act_start || arc=$? ;;
-      advance) act_advance "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
-      ship) act_ship "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .pr)" || arc=$? ;;
-      restart) act_restart "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
-      retry) act_retry "$(rget "$a" .run)" "$(rget "$a" .task)" || arc=$? ;;
-      nudge) act_nudge "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" || arc=$? ;;
-      cleanup) act_cleanup "$(rget "$a" .worktree)" || arc=$? ;;
-      abandon) act_abandon "$(rget "$a" .run)" "$(rget "$a" .reason)" || arc=$? ;;
-      stop) act_stop "$(rget "$a" .reason)" "$(rget "$a" .run)" "$(rget "$a" .task)" "$(rget "$a" .dispatch)" "$(rget "$a" .agent_failed)" || arc=$? ;;
+      advance) act_advance "$a_run" "$a_task" || arc=$? ;;
+      ship) act_ship "$a_run" "$a_task" "$a_pr" || arc=$? ;;
+      restart) act_restart "$a_run" "$a_task" || arc=$? ;;
+      retry) act_retry "$a_run" "$a_task" || arc=$? ;;
+      nudge) act_nudge "$a_run" "$a_task" "$a_dispatch" || arc=$? ;;
+      cleanup) act_cleanup "$a_worktree" || arc=$? ;;
+      abandon) act_abandon "$a_run" "$a_reason" || arc=$? ;;
+      stop) act_stop "$a_reason" "$a_run" "$a_task" "$a_dispatch" "$a_agent_failed" || arc=$? ;;
       *) log "unknown action: $a"; arc=1 ;;
     esac
     [ $arc -eq 0 ] || { trace "action failed: $a"; log "action failed: $a"; exit_status=1; }

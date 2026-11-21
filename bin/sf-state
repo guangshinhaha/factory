@@ -87,15 +87,25 @@ trap 'rm -rf "$tmp"' EXIT
 # Open issues, once. `--label`/`--search` would go through the search API (shinfactory#175).
 gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "$tmp/issues.json" \
   || die "open issues not listed (gh issue list failed)"
-jq -se 'length == 1 and (.[0] | type == "array")' "$tmp/issues.json" > /dev/null 2>&1 \
-  || die "open issues not listed: gh issue list printed no single JSON array"
-# A whole number up to 2^53-1: jq calls NaN and 1e1000 numbers, so type alone is no check.
-jq -e 'all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991))' "$tmp/issues.json" > /dev/null 2>&1 \
-  || die "open issues not listed: an issue number is not a whole number"
-# gh stops at --limit without saying so; a cut-off list would make live Runs look closed.
-jq -e 'length < 1000' "$tmp/issues.json" > /dev/null \
-  || die "open issues not listed: 1000 issues is the page limit, so the list may be cut off"
-dup=$(jq -r '[.[].number] | group_by(.)[] | select(length > 1) | .[0]' "$tmp/issues.json" | head -n 1)
+# One pass over the list checks it whole: one JSON array (slurped: exactly one document), every number a
+# whole number up to 2^53-1 (jq calls NaN and 1e1000 numbers, so type alone is no check), under gh's
+# --limit (gh stops there without saying so; a cut-off list would make live Runs look closed), no
+# number twice. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
+dup=$(jq -rs '
+  if (length == 1 and (.[0] | type == "array")) | not then error("sf-state:shape")
+  else .[0] as $a
+    | if (try ($a | all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991))) catch false) | not then error("sf-state:number")
+      elif ($a | length) >= 1000 then error("sf-state:limit")
+      else first([$a[].number] | group_by(.)[] | select(length > 1) | .[0]) // empty end
+  end' "$tmp/issues.json" 2> "$tmp/jq.err") || {
+  jq_why=''
+  read -r jq_why < "$tmp/jq.err" || :
+  case "$jq_why" in
+    *sf-state:number*) die "open issues not listed: an issue number is not a whole number" ;;
+    *sf-state:limit*) die "open issues not listed: 1000 issues is the page limit, so the list may be cut off" ;;
+    *) die "open issues not listed: gh issue list printed no single JSON array" ;;
+  esac
+}
 [ -z "$dup" ] || die "open issues not listed: issue #$dup is listed twice"
 
 # A release path issue that is not among the open ones is closed (the release is over: no path)
@@ -112,11 +122,17 @@ fi
 # A fork PR is never the factory's, whatever its branch is named: drop it before matching.
 gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCrossRepository > "$tmp/prs.raw" \
   || die "open PRs not listed (gh pr list failed)"
-jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991) and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))' "$tmp/prs.raw" > /dev/null 2>&1 \
-  || die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository"
-jq -e 'length < 1000' "$tmp/prs.raw" > /dev/null \
-  || die "open PRs not listed: 1000 PRs is the page limit, so the list may be cut off"
-jq -c '[.[] | select(.isCrossRepository == false)]' "$tmp/prs.raw" > "$tmp/prs.json" || die "open PRs not filtered (jq failed)"
+jq -sc '
+  if (try (length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991) and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))) catch false) | not then error("sf-state:shape")
+  elif (.[0] | length) >= 1000 then error("sf-state:limit")
+  else .[0] | [.[] | select(.isCrossRepository == false)] end' "$tmp/prs.raw" > "$tmp/prs.json" 2> "$tmp/jq.err" || {
+  jq_why=''
+  read -r jq_why < "$tmp/jq.err" || :
+  case "$jq_why" in
+    *sf-state:limit*) die "open PRs not listed: 1000 PRs is the page limit, so the list may be cut off" ;;
+    *) die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository" ;;
+  esac
+}
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
@@ -129,6 +145,8 @@ factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/run-ids"
 cursor=
 seen_cursors=' '
+cr=$(printf '\r')
+tab=$(printf '\t')
 while :; do
   if [ -n "$cursor" ]; then
     orca orchestration run-list --json --full --limit 100 --cursor "$cursor" > "$tmp/page" \
@@ -137,26 +155,51 @@ while :; do
     orca orchestration run-list --json --full --limit 100 > "$tmp/page" \
       || die "Orca Runs not listed (orca orchestration run-list failed)"
   fi
-  jq -se 'length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))' \
-    "$tmp/page" > /dev/null 2>&1 || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  jq -e '.result | (.nextCursor == null or (.nextCursor | type == "string"))' "$tmp/page" > /dev/null 2>&1 \
-    || die "Orca Runs not listed: nextCursor is not a string"
-  jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids" || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
-  [ -z "$dup" ] || die "Orca Runs not listed: Run id $dup is listed twice"
-  jq -r --arg re "$factory_objective" \
-    '.result.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv' \
-    "$tmp/page" > "$tmp/factory-runs.raw" || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  tr -d '\r' < "$tmp/factory-runs.raw" > "$tmp/factory-runs.tsv"
-  while IFS="$(printf '\t')" read -r id objective created; do
+  # One pass checks the page whole (one document, an array of runs with string id and objective, a string
+  # or null nextCursor, no id twice across the pages so far) and prints the cursor line, then one TSV
+  # row per factory Run. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
+  jq -rs --arg re "$factory_objective" --rawfile seen "$tmp/run-ids" '
+    if (try (length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))) catch false) | not then error("sf-state:shape")
+    else .[0].result as $r
+      | if ($r | (.nextCursor == null or (.nextCursor | type == "string"))) | not then error("sf-state:cursor")
+        else (($seen | split("\n") | map(select(. != ""))) + [$r.runs[].id]) as $all
+          | if ($all | length) != ($all | unique | length) then error("sf-state:dup")
+            else ($r.nextCursor // ""),
+              ($r.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv) end
+        end
+    end' "$tmp/page" > "$tmp/page.rows" 2> "$tmp/jq.err" || {
+    jq_why=''
+    read -r jq_why < "$tmp/jq.err" || :
+    case "$jq_why" in
+      *sf-state:cursor*) die "Orca Runs not listed: nextCursor is not a string" ;;
+      *sf-state:dup*)
+        jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids"
+        dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
+        die "Orca Runs not listed: Run id $dup is listed twice"
+        ;;
+      *) die "Orca Runs not listed: $(snippet "$tmp/page")" ;;
+    esac
+  }
+  # The cursor is the first row; the rest are the factory Runs.
+  { IFS= read -r cursor || :
+  cursor=${cursor%"$cr"}
+  while IFS="$tab" read -r id objective created; do
+    created=${created%"$cr"}
     orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
-    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
-      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
-      "$tmp/tasks" > "$tmp/run.json" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+    # One pass checks the task list whole and prints whether the Run's inbox is wanted (below), then the Run.
+    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" --arg p "factory $repo#" \
+      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string")))
+       | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}
+       | (any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))), .' \
+      "$tmp/tasks" > "$tmp/run.rows" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+    { IFS= read -r want || :
+      IFS= read -r runline || :
+    } < "$tmp/run.rows"
+    printf '%s\n' "$runline" > "$tmp/run.json"
     # A dispatched task's worker may have stopped without reporting: Orca says so in the Run inbox.
     # Only a factory Run of this repo is acted on, so only its inbox is read.
-    if jq -e --arg p "factory $repo#" 'any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))' "$tmp/run.json" > /dev/null; then
+    if [ "${want%"$cr"}" = true ]; then
       orca orchestration inbox --terminal "run:$id" --limit 500 --json --full > "$tmp/inbox" \
         || die "inbox of Run $id not read (orca orchestration inbox failed)"
       jq -c -s -e --slurpfile run "$tmp/run.json" \
@@ -168,9 +211,10 @@ while :; do
       mv "$tmp/run-inbox.json" "$tmp/run.json"
     fi
     cat "$tmp/run.json" >> "$tmp/runs.jsonl"
-  done < "$tmp/factory-runs.tsv"
-  cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')
+  done
+  } < "$tmp/page.rows"
   [ -n "$cursor" ] || break
+  jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids" || die "Orca Runs not listed: $(snippet "$tmp/page")"
   case "$seen_cursors" in
     *" $cursor "*) die "Orca Runs not listed: run-list repeated cursor [$cursor]" ;;
   esac
@@ -198,24 +242,33 @@ jq -r --arg repo "$repo" --slurpfile runs "$tmp/runs.jsonl" '
     else empty end' "$tmp/issues.json" > "$tmp/timeline-issues.raw" \
   || die "open issues not read: the issue list has an unexpected shape"
 tr -d '\r' < "$tmp/timeline-issues.raw" > "$tmp/timeline-issues"
+# One pass per timeline checks it whole and writes {n, events}: gh's pages are arrays, every event an
+# object, a ready issue has a `ready` label event, and every label, reopened and comment event has a UTC
+# time. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
 while read -r n kind; do
   gh api "repos/$repo/issues/$n/timeline" --paginate > "$tmp/timeline" \
     || die "timeline of #$n not read (gh api failed)"
-  jq -cs --argjson n "$n" 'if length > 0 and all(.[]; type == "array") then {n: $n, events: add} else error end' \
-    "$tmp/timeline" > "$tmp/timeline.json" 2> /dev/null \
-    || die "timeline of #$n not read: gh api printed no JSON array"
-  jq -e '.events | all(.[]; type == "object")' "$tmp/timeline.json" > /dev/null \
-    || die "timeline of #$n has an event that is not an object"
-  if [ "$kind" = ready ]; then
-    jq -e 'any(.events[]; .event == "labeled" and .label.name == "ready")' "$tmp/timeline.json" > /dev/null \
-      || die "timeline of #$n has no ready label event"
-  fi
-  jq -e '[.events[] | select(.event == "labeled") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a label event with no UTC time"
-  jq -e '[.events[] | select(.event == "reopened") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a reopened event with no UTC time"
-  jq -e '[.events[] | select(.event == "commented") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a comment with no UTC time"
+  jq -cs --argjson n "$n" --arg kind "$kind" '
+    def utc: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$");
+    if length > 0 and all(.[]; type == "array") then {n: $n, events: add} else error("sf-state:array") end
+    | if (.events | all(.[]; type == "object")) | not then error("sf-state:object")
+      elif $kind == "ready" and (any(.events[]; .event == "labeled" and .label.name == "ready") | not) then error("sf-state:ready")
+      elif ([.events[] | select(.event == "labeled") | .created_at] | all(utc)) | not then error("sf-state:labeled")
+      elif ([.events[] | select(.event == "reopened") | .created_at] | all(utc)) | not then error("sf-state:reopened")
+      elif ([.events[] | select(.event == "commented") | .created_at] | all(utc)) | not then error("sf-state:commented")
+      else . end' \
+    "$tmp/timeline" > "$tmp/timeline.json" 2> "$tmp/jq.err" || {
+    jq_why=''
+    read -r jq_why < "$tmp/jq.err" || :
+    case "$jq_why" in
+      *sf-state:object*) die "timeline of #$n has an event that is not an object" ;;
+      *sf-state:ready*) die "timeline of #$n has no ready label event" ;;
+      *sf-state:labeled*) die "timeline of #$n has a label event with no UTC time" ;;
+      *sf-state:reopened*) die "timeline of #$n has a reopened event with no UTC time" ;;
+      *sf-state:commented*) die "timeline of #$n has a comment with no UTC time" ;;
+      *) die "timeline of #$n not read: gh api printed no JSON array" ;;
+    esac
+  }
   cat "$tmp/timeline.json" >> "$tmp/timelines.jsonl"
 done < "$tmp/timeline-issues"
 
