@@ -154,9 +154,8 @@ failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /
 # The task's result line JSON (`factory-result: {...}`, the body's last non-empty line), or
 # nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
 result_json() {
-  raw=$(tfield "$1" result)
-  body=$(printf '%s' "$raw" | jq -Rrs 'try (fromjson | .body // empty) catch empty' 2> /dev/null)
-  [ -n "$body" ] || body=$raw
+  body=$(jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | (.result // "" | tostring) as $raw
+    | (try ($raw | fromjson | .body // empty | tostring | select(. != "")) catch empty) // $raw' "$tmp/tasks.json")
   line=$(printf '%s\n' "$body" | awk 'NF { l = $0 } END { print l }')
   # Workers sometimes end the body's last line with the result instead of giving it its own line
   # (seen in the e2e): the JSON after the line's last `factory-result: ` counts too.
