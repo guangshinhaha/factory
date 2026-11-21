@@ -1,5 +1,4 @@
 # shellcheck shell=sh
-# shellcheck disable=SC2317,SC2329 # sourcing fake-cli (it exits) makes shellcheck see the helpers as unreachable
 # Test helpers, sourced by test/run before each test file.
 # test/run sets these before a test function starts:
 #   FAKE_LOG       every fake gh/orca call, one line each
@@ -8,7 +7,7 @@
 # PATH starts with the fakes dir, then a guard dir whose gh/orca fail the test.
 
 # mkkey: the fakes' fixture key function, loaded once here instead of one `sh fake-cli --key` per call.
-# shellcheck source=test/fakes/fake-cli
+# shellcheck source=/dev/null # not followed: fake-cli exits, which would mark the rest of this file unreachable
 FAKE_CLI_LIB=1 . "$FACTORY_ROOT/test/fakes/fake-cli"
 unset FAKE_CLI_LIB
 
