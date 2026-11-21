@@ -45,13 +45,13 @@ is_number() {
 # marker, so a marker copied into the middle of a comment's text never counts.
 # markers_since_ready <repo> <issue>: print a JSON array of the issue's factory marker objects
 # (<!-- factory:{"kind":...} -->) from OWNER/MEMBER/COLLABORATOR comments made after the last
-# `ready` label event, oldest first. sf-state reads markers the same way.
+# `ready` label or `reopened` event, oldest first. sf-state reads markers the same way.
 # Returns 1, printing nothing, when the timeline can't be read.
 markers_since_ready() {
   tl=$(gh api "repos/$1/issues/$2/timeline" --paginate) || return 1
   printf '%s\n' "$tl" | jq -cs '
     if length > 0 and all(.[]; type == "array") then add else error("no JSON array") end
-    | ([.[] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max // "") as $since
+    | ([.[] | select((.event == "labeled" and .label.name == "ready") or .event == "reopened") | .created_at] | max // "") as $since
     | [.[] | select(.event == "commented" and .created_at > $since
           and ((.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a)))
         | (.body // "" | split("\n") | map(rtrimstr("\r") | select(test("\\S"))) | last // "")

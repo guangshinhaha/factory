@@ -411,7 +411,7 @@ def run_state:
     | [.tasks[] | select(.status == "ready" and (.title == "debrief" or .title == "lessons" or .title == "ship"))] as $after
     | if ($after | length) > 0 then $after[] | {action: "advance", issue: ($o.n | tonumber), run: $r.id, task: .id}
       elif any(.tasks[]; .title == "debrief" or .title == "lessons") then empty
-      else {action: "abandon", issue: ($o.n | tonumber), run: $r.id, reason: "issue #\($o.n) closed before the Run shipped"} end]) as $closed_actions
+      else {action: "abandon", issue: ($o.n | tonumber), run: $r.id, reason: "issue #\($o.n) closed before merge"} end]) as $closed_actions
   | ([$cands[] | select(.run != null) | run_actions(.)] + $closed_actions) as $run_actions
   # A restart revives a Run, so it takes a slot a start would otherwise get.
   | ([$run_actions[] | select(.action == "restart") | .run] | unique | length) as $restarting

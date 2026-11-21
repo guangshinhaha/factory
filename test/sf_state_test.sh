@@ -212,6 +212,14 @@ test_a_full_page_of_open_issues_is_an_error() {
   assert_contains "$(cat "$TEST_TMP/err")" "open issues not listed: 1000 issues is the page limit" "stderr"
 }
 
+# 999 is under the page limit: the list is complete, so sf-state reads it.
+test_999_open_issues_and_999_open_prs_are_read() {
+  world
+  issues "$(jq -cn '[range(1; 1000) | {number: ., labels: [], body: ""}]')"
+  prs "$(jq -cn '[range(1; 1000) | {number: ., headRefName: "b\(.)", isCrossRepository: false}]')"
+  if ! state > /dev/null 2> "$TEST_TMP/err"; then fail "sf-state refused 999 open issues and PRs: $(cat "$TEST_TMP/err")"; fi
+}
+
 test_a_full_page_of_open_prs_is_an_error() {
   world
   prs "$(jq -cn '[range(1; 1001) | {number: ., headRefName: "b\(.)"}]')"
@@ -836,7 +844,7 @@ test_closed_issue_live_run_advances_only_debrief_and_lessons() {
   runs "[$(run_json run_a 7),$(run_json run_b 8)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"debrief"}]'
   tasks run_b '[{"id":"t1","status":"ready","title":"review"}]'
-  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"},{"action":"abandon","issue":8,"run":"run_b","reason":"issue #8 closed before the Run shipped"}]' "$(state)" "actions"
+  assert_eq '[{"action":"advance","issue":7,"run":"run_a","task":"t2"},{"action":"abandon","issue":8,"run":"run_b","reason":"issue #8 closed before merge"}]' "$(state)" "actions"
 }
 
 test_closed_issue_live_run_finishes_a_ready_ship() {
@@ -852,7 +860,7 @@ test_closed_issue_live_run_before_ship_is_abandoned() {
   issues '[]'
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"build"},{"id":"t2","status":"ready","title":"gate"}]'
-  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before merge"}]' "$(state)" "actions"
 }
 
 test_closed_issue_live_run_after_ship_waits_for_its_debrief() {
@@ -870,7 +878,7 @@ test_closed_issue_live_run_in_a_rebase_round_is_abandoned() {
   issues '[]'
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"ship"},{"id":"t2","status":"ready","title":"verify"},{"id":"t3","status":"pending","title":"ship"}]'
-  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "actions"
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before merge"}]' "$(state)" "actions"
 }
 
 retry_marker() { comment "<!-- factory:{\\\"kind\\\":\\\"retry\\\",\\\"task\\\":\\\"$1\\\"} -->" "$2"; }
@@ -953,7 +961,7 @@ test_cleanup_waits_for_an_open_issue_an_agent_or_a_live_run() {
   worktrees "[$(wt /w/app-7 app-7 7)]"
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
-  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before the Run shipped"}]' "$(state)" "live run"
+  assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before merge"}]' "$(state)" "live run"
 }
 
 test_cleanup_does_not_wait_for_idle_terminals_only_for_an_agent() {

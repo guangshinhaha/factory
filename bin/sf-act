@@ -708,6 +708,7 @@ step_shipped() {
     done_with "$2" "issue closed without a merged PR; no debrief"
     return
   fi
+  stage merge
   queue_debrief "$1" "$2"
   done_with "$2" "merged (PR #$merged) by an earlier fire"
 }

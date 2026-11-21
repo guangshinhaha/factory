@@ -159,6 +159,12 @@ EOF
   kill -9 "$act_pid" 2> /dev/null || :
   wait "$act_pid" 2> /dev/null || :
   [ -d "$FACTORY_TICK_LOCK" ] || fail "lock removed by a killed sf-act"
+  # Without an init process (Docker, no --init) the killed sf-act stays a zombie, and `kill -0`
+  # succeeds on a zombie. So the holder becomes a child this shell has started and reaped: dead for sure.
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" || :
+  echo "$dead" > "$FACTORY_TICK_LOCK/pid"
   assert_eq 1 "$(runs_count)" "Runs after the kill"
   assert_eq none "$(status_of route)" "route after the kill"
   # Next fire: the dead holder is reaped and sf-act picks the Run up.
