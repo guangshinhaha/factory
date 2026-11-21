@@ -76,8 +76,9 @@ release_path=null
 if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-release-path:' CLAUDE.md; then
   keys=$(grep -Ec '^[[:space:]]*factory-release-path:' CLAUDE.md)
   release_path=$(sed -n 's/^[[:space:]]*factory-release-path:[[:space:]]*#\([1-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
-  [ -n "$release_path" ] && [ "$keys" = 1 ] \
-    || die "factory-release-path in CLAUDE.md is not exactly one issue reference like #72 (found $keys key lines), so no issue starts"
+  if [ -z "$release_path" ] || [ "$keys" != 1 ]; then
+    die "factory-release-path in CLAUDE.md is not exactly one issue reference like #72 (found $keys key lines), so no issue starts"
+  fi
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-state.XXXXXX") || die "temp dir not created"
