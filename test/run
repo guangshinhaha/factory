@@ -18,11 +18,12 @@ fi
 
 
 # write_guard <dir> <tool>: logs to the file named by $FACTORY_GUARD_LOG, which run_unit sets per test,
-# so one guard dir serves every test.
+# so one guard dir serves every test. A test that unsets the variable still leaves a trace: the shim falls
+# back to $1/unattributed.log, and the run fails if that file is ever non-empty.
 write_guard() {
   cat > "$1/$2" <<GUARD
 #!/bin/sh
-printf '%s\n' "$2 \$*" >> "\$FACTORY_GUARD_LOG"
+printf '%s\n' "$2 \$*" >> "\${FACTORY_GUARD_LOG:-$1/unattributed.log}"
 echo "guard: real $2 reached (no fake $2 on PATH): $2 \$*" >&2
 exit 99
 GUARD
@@ -235,6 +236,11 @@ UNIT
   fi
 done
 wait
+
+if [ -s "$results/guard/unattributed.log" ]; then
+  echo "FAIL guard: a test reached a real CLI with FACTORY_GUARD_LOG unset: $(tr '\n' ';' < "$results/guard/unattributed.log")"
+  failed=$((failed + 1))
+fi
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
