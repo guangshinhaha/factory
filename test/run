@@ -143,6 +143,28 @@ if [ -f "$root/test/ship_world.sh" ]; then
   done
 fi
 
+# The same for the init world (test/init_world.sh).
+make_init_world_template() {
+  mkdir "$1" || return 1
+  (
+    FACTORY_ROOT=$root HOME=$results/home
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT HOME
+    # shellcheck source=/dev/null
+    . "$root/test/lib.sh"
+    # shellcheck source=/dev/null
+    . "$root/test/init_world.sh"
+    set -e
+    init_world_repos "$1"
+  ) > /dev/null 2>&1
+}
+INIT_WORLD_TEMPLATE=$results/init-world
+export INIT_WORLD_TEMPLATE
+if [ -f "$root/test/init_world.sh" ]; then
+  mkdir -p "$results/home"
+  if ! make_init_world_template "$INIT_WORLD_TEMPLATE"; then rm -rf "$INIT_WORLD_TEMPLATE"; fi
+fi
+
 passed=0
 failed=0
 
