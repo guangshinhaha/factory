@@ -147,6 +147,7 @@ total=0
 # finishes (completion order), so a timeout still shows progress.
 next=1
 pending=""
+nap=0.2
 active=0
 printed=0
 while [ "$printed" -lt "$total" ]; do
@@ -175,7 +176,14 @@ UNIT
     fi
   done
   pending=$still
-  [ "$progress" -eq 1 ] || sleep 0.2
+  # Every poll that finds nothing costs a sleep process, so the wait grows to 1s while no test
+  # finishes and resets when one does.
+  if [ "$progress" -eq 1 ]; then
+    nap=0.2
+  else
+    sleep "$nap"
+    case "$nap" in 0.2) nap=0.5 ;; 0.5) nap=1 ;; esac
+  fi
 done
 wait
 
