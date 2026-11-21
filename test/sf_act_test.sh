@@ -616,6 +616,23 @@ test_a_ship_left_ready_after_the_merge_completes_on_the_next_fire() {
   assert_eq dispatched "$(status_of debrief)" "debrief"
 }
 
+test_a_merge_found_by_a_later_fire_is_stamped() {
+  world
+  clock 2026-11-19T01:00:00Z
+  to_ship
+  echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  orca_fails task-update "orca: down"
+  act
+  orca_ok task-update
+  rm "$TEST_TMP/sf-ship.out"
+  issues '[]'
+  echo 12 | fixture gh pr list -R "$REPO" --head app-7 --state merged --json number,isCrossRepository -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
+  clock 2026-11-19T03:00:00Z
+  acts
+  assert_contains "$(fake_stdin)" "$(stage_marker merge 2026-11-19T03:00:00Z)"
+}
+
 test_a_ship_left_ready_on_an_issue_closed_without_a_merge_completes_without_a_debrief() {
   world
   to_ship

@@ -172,6 +172,17 @@ test_stop_reason_cannot_mention_link_or_forge_a_marker() {
   assert_eq '["stop"]' "$kinds" "marker kinds read back"
 }
 
+# A reopen cuts the markers like a re-ready: sf-state already reads the timeline that way, so the
+# stage stamps, timeline, stop and hold markers of a reopened issue start over.
+test_a_reopen_cuts_the_markers_like_a_re_ready() {
+  world
+  old=$(jq -cn '{event: "commented", author_association: "OWNER", body: "x\n\n<!-- factory:{\"kind\":\"stop\"} -->", created_at: "2026-11-02T00:00:00Z"}')
+  new=$(jq -cn '{event: "commented", author_association: "OWNER", body: "x\n\n<!-- factory:{\"kind\":\"attempt\"} -->", created_at: "2026-11-06T00:00:00Z"}')
+  timeline "[$READIED,$old,{\"event\":\"closed\",\"created_at\":\"2026-11-03T00:00:00Z\"},{\"event\":\"reopened\",\"created_at\":\"2026-11-05T00:00:00Z\"},$new]"
+  kinds=$(sh -c ". '$FACTORY_ROOT/lib/factory.sh'; markers_since_ready $REPO 7 | jq -c '[.[].kind]'")
+  assert_eq '["attempt"]' "$kinds" "marker kinds after a reopen"
+}
+
 test_a_marker_in_the_middle_of_a_comment_is_not_read() {
   world
   body=$(printf 'quoted: <!-- factory:{"kind":"ask","head":"abc"} -->\nmore text')
