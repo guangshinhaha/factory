@@ -145,6 +145,8 @@ factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/run-ids"
 cursor=
 seen_cursors=' '
+cr=$(printf '\r')
+tab=$(printf '\t')
 while :; do
   if [ -n "$cursor" ]; then
     orca orchestration run-list --json --full --limit 100 --cursor "$cursor" > "$tmp/page" \
@@ -153,18 +155,36 @@ while :; do
     orca orchestration run-list --json --full --limit 100 > "$tmp/page" \
       || die "Orca Runs not listed (orca orchestration run-list failed)"
   fi
-  jq -se 'length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))' \
-    "$tmp/page" > /dev/null 2>&1 || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  jq -e '.result | (.nextCursor == null or (.nextCursor | type == "string"))' "$tmp/page" > /dev/null 2>&1 \
-    || die "Orca Runs not listed: nextCursor is not a string"
-  jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids" || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
-  [ -z "$dup" ] || die "Orca Runs not listed: Run id $dup is listed twice"
-  jq -r --arg re "$factory_objective" \
-    '.result.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv' \
-    "$tmp/page" > "$tmp/factory-runs.raw" || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  tr -d '\r' < "$tmp/factory-runs.raw" > "$tmp/factory-runs.tsv"
-  while IFS="$(printf '\t')" read -r id objective created; do
+  # One pass checks the page whole (one document, an array of runs with string id and objective, a string
+  # or null nextCursor, no id twice across the pages so far) and prints the cursor line, then one TSV
+  # row per factory Run. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
+  jq -rs --arg re "$factory_objective" --rawfile seen "$tmp/run-ids" '
+    if (try (length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))) catch false) | not then error("sf-state:shape")
+    else .[0].result as $r
+      | if ($r | (.nextCursor == null or (.nextCursor | type == "string"))) | not then error("sf-state:cursor")
+        else (($seen | split("\n") | map(select(. != ""))) + [$r.runs[].id]) as $all
+          | if ($all | length) != ($all | unique | length) then error("sf-state:dup")
+            else ($r.nextCursor // ""),
+              ($r.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv) end
+        end
+    end' "$tmp/page" > "$tmp/page.rows" 2> "$tmp/jq.err" || {
+    jq_why=''
+    read -r jq_why < "$tmp/jq.err" || :
+    case "$jq_why" in
+      *sf-state:cursor*) die "Orca Runs not listed: nextCursor is not a string" ;;
+      *sf-state:dup*)
+        jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids"
+        dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
+        die "Orca Runs not listed: Run id $dup is listed twice"
+        ;;
+      *) die "Orca Runs not listed: $(snippet "$tmp/page")" ;;
+    esac
+  }
+  # The cursor is the first row; the rest are the factory Runs.
+  { IFS= read -r cursor || :
+  cursor=${cursor%"$cr"}
+  while IFS="$tab" read -r id objective created; do
+    created=${created%"$cr"}
     orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
     jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
@@ -184,9 +204,10 @@ while :; do
       mv "$tmp/run-inbox.json" "$tmp/run.json"
     fi
     cat "$tmp/run.json" >> "$tmp/runs.jsonl"
-  done < "$tmp/factory-runs.tsv"
-  cursor=$(jq -r '.result.nextCursor // empty' "$tmp/page" | tr -d '\r')
+  done
+  } < "$tmp/page.rows"
   [ -n "$cursor" ] || break
+  jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids" || die "Orca Runs not listed: $(snippet "$tmp/page")"
   case "$seen_cursors" in
     *" $cursor "*) die "Orca Runs not listed: run-list repeated cursor [$cursor]" ;;
   esac
