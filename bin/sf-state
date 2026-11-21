@@ -87,15 +87,25 @@ trap 'rm -rf "$tmp"' EXIT
 # Open issues, once. `--label`/`--search` would go through the search API (shinfactory#175).
 gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "$tmp/issues.json" \
   || die "open issues not listed (gh issue list failed)"
-jq -se 'length == 1 and (.[0] | type == "array")' "$tmp/issues.json" > /dev/null 2>&1 \
-  || die "open issues not listed: gh issue list printed no single JSON array"
-# A whole number up to 2^53-1: jq calls NaN and 1e1000 numbers, so type alone is no check.
-jq -e 'all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991))' "$tmp/issues.json" > /dev/null 2>&1 \
-  || die "open issues not listed: an issue number is not a whole number"
-# gh stops at --limit without saying so; a cut-off list would make live Runs look closed.
-jq -e 'length < 1000' "$tmp/issues.json" > /dev/null \
-  || die "open issues not listed: 1000 issues is the page limit, so the list may be cut off"
-dup=$(jq -r '[.[].number] | group_by(.)[] | select(length > 1) | .[0]' "$tmp/issues.json" | head -n 1)
+# One pass over the list checks it whole: one JSON array (slurped: exactly one document), every number a
+# whole number up to 2^53-1 (jq calls NaN and 1e1000 numbers, so type alone is no check), under gh's
+# --limit (gh stops there without saying so; a cut-off list would make live Runs look closed), no
+# number twice. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
+dup=$(jq -rs '
+  if (length == 1 and (.[0] | type == "array")) | not then error("sf-state:shape")
+  else .[0] as $a
+    | if (try ($a | all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991))) catch false) | not then error("sf-state:number")
+      elif ($a | length) >= 1000 then error("sf-state:limit")
+      else first([$a[].number] | group_by(.)[] | select(length > 1) | .[0]) // empty end
+  end' "$tmp/issues.json" 2> "$tmp/jq.err") || {
+  jq_why=''
+  read -r jq_why < "$tmp/jq.err" || :
+  case "$jq_why" in
+    *sf-state:number*) die "open issues not listed: an issue number is not a whole number" ;;
+    *sf-state:limit*) die "open issues not listed: 1000 issues is the page limit, so the list may be cut off" ;;
+    *) die "open issues not listed: gh issue list printed no single JSON array" ;;
+  esac
+}
 [ -z "$dup" ] || die "open issues not listed: issue #$dup is listed twice"
 
 # A release path issue that is not among the open ones is closed (the release is over: no path)
@@ -112,11 +122,17 @@ fi
 # A fork PR is never the factory's, whatever its branch is named: drop it before matching.
 gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCrossRepository > "$tmp/prs.raw" \
   || die "open PRs not listed (gh pr list failed)"
-jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991) and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))' "$tmp/prs.raw" > /dev/null 2>&1 \
-  || die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository"
-jq -e 'length < 1000' "$tmp/prs.raw" > /dev/null \
-  || die "open PRs not listed: 1000 PRs is the page limit, so the list may be cut off"
-jq -c '[.[] | select(.isCrossRepository == false)]' "$tmp/prs.raw" > "$tmp/prs.json" || die "open PRs not filtered (jq failed)"
+jq -sc '
+  if (try (length == 1 and (.[0] | type == "array" and all(.[]; (.number | type == "number" and . == floor and . >= 1 and . <= 9007199254740991) and (.headRefName | type == "string") and (.isCrossRepository | type == "boolean")))) catch false) | not then error("sf-state:shape")
+  elif (.[0] | length) >= 1000 then error("sf-state:limit")
+  else .[0] | [.[] | select(.isCrossRepository == false)] end' "$tmp/prs.raw" > "$tmp/prs.json" 2> "$tmp/jq.err" || {
+  jq_why=''
+  read -r jq_why < "$tmp/jq.err" || :
+  case "$jq_why" in
+    *sf-state:limit*) die "open PRs not listed: 1000 PRs is the page limit, so the list may be cut off" ;;
+    *) die "open PRs not listed: gh pr list printed no single array of PRs with number, headRefName and isCrossRepository" ;;
+  esac
+}
 
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
