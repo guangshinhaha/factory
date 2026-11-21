@@ -9,6 +9,9 @@ Set in the target repo's CLAUDE.md, on its default branch. `sf-init` adds `facto
 
 - `shinstack-mode: auto|supervised|manual`: how far the factory goes on its own (merge needs `auto`).
 - `factory-concurrency: N`: live Runs for this repo (default 2).
+- `factory-release-path: #N`: while issue N is open, only the ready issues on its list lines (`- #12`,
+  `1. #12`, `- [ ] #12`; prose mentions don't count) start, in list order. N closed: no path, all ready
+  issues start. Not exactly one `#N` line, or an N that doesn't exist: `sf-state` errors and nothing starts.
 - `factory-sensitive: true|false`: with `true`, review stays on Claude (`claude/opus`) and ignores any
   `factory-model.review` line.
 - `factory-model.<station>: <agent>/<model>`: overrides a station's worker. Stations: `intake`, `plan`,

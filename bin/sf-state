@@ -3,7 +3,9 @@
 # Usage: sf-state [owner/repo]   (default: the repo in the current directory, via gh)
 # Run from the repo's checkout: `factory-concurrency: N` is read from ./CLAUDE.md (default 2).
 # `factory-release-path: #N` in ./CLAUDE.md, while issue N is open: only ready issues listed in N's body
-# start, in list order (still honouring `Depends on`); other ready issues are left alone.
+# (list lines like `- #12`, `1. #12`, `- [ ] #12`) start, in list order (still honouring `Depends on`);
+# other ready issues are left alone. N closed: no path. A key that is not one `#N`, or an N that
+# does not exist, is an error and nothing starts.
 # FACTORY_MAX_RUNS caps live `factory */*#*` Runs host-wide (default 4).
 #
 # Actions, one object each, sorted by issue:
@@ -68,10 +70,15 @@ if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-concurrency:' CLAUDE.md; t
 fi
 
 # `factory-release-path: #N` names an issue whose body lists, in order, the only ready issues to start.
+# A key that is set but unusable (not #N, repeated, or N neither open nor closed) stops everything:
+# a typo must not start the whole backlog.
 release_path=null
 if [ -f CLAUDE.md ] && grep -Eq '^[[:space:]]*factory-release-path:' CLAUDE.md; then
-  release_path=$(sed -n 's/^[[:space:]]*factory-release-path:[[:space:]]*#\([0-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
-  [ -n "$release_path" ] || die "factory-release-path in CLAUDE.md is not an issue reference like #72"
+  keys=$(grep -Ec '^[[:space:]]*factory-release-path:' CLAUDE.md)
+  release_path=$(sed -n 's/^[[:space:]]*factory-release-path:[[:space:]]*#\([1-9][0-9]*\)[[:space:]]*$/\1/p' CLAUDE.md | head -n 1)
+  if [ -z "$release_path" ] || [ "$keys" != 1 ]; then
+    die "factory-release-path in CLAUDE.md is not exactly one issue reference like #72 (found $keys key lines), so no issue starts"
+  fi
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-state.XXXXXX") || die "temp dir not created"
@@ -90,6 +97,17 @@ jq -e 'length < 1000' "$tmp/issues.json" > /dev/null \
   || die "open issues not listed: 1000 issues is the page limit, so the list may be cut off"
 dup=$(jq -r '[.[].number] | group_by(.)[] | select(length > 1) | .[0]' "$tmp/issues.json" | head -n 1)
 [ -z "$dup" ] || die "open issues not listed: issue #$dup is listed twice"
+
+# A release path issue that is not among the open ones is closed (the release is over: no path)
+# or unresolvable (missing, mistyped, or past the list limit): the latter starts nothing.
+release_closed=false
+if [ "$release_path" != null ] && ! jq -e --argjson n "$release_path" 'any(.[]; .number == $n)' "$tmp/issues.json" > /dev/null; then
+  rp_state=$(gh issue view "$release_path" -R "$repo" --json state --jq .state 2> /dev/null) \
+    || die "factory-release-path #$release_path not found in $repo, so no issue starts"
+  [ "$rp_state" = CLOSED ] \
+    || die "factory-release-path #$release_path is [$rp_state] but not in the open issue list, so no issue starts"
+  release_closed=true
+fi
 
 # A fork PR is never the factory's, whatever its branch is named: drop it before matching.
 gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName,isCrossRepository > "$tmp/prs.raw" \
@@ -206,6 +224,7 @@ jq -n -c \
   --argjson concurrency "$concurrency" \
   --argjson max_runs "$max_runs" \
   --argjson release_path "$release_path" \
+  --argjson release_closed "$release_closed" \
   --slurpfile issues "$tmp/issues.json" \
   --slurpfile prs "$tmp/prs.json" \
   --slurpfile timelines "$tmp/timelines.jsonl" \
@@ -232,6 +251,12 @@ def reset_epoch: try (.reset | epoch) catch null;
 # #M refs on a `Depends on` line (heading, bold or plain), and on the list lines right after it
 # (`#3`, `- #3`, `1. #3`, `- [ ] #3`). Cross-repo refs (owner/repo#M) are ignored.
 def refs: [scan("(?<![A-Za-z0-9_./-])#([0-9]+)") | .[0] | tonumber];
+# A release path issue lists its issues on list lines (`- #3`, `1. #3`, `- [ ] #3`), in order, once each.
+# Prose and headings that mention an issue are not entries.
+def path_refs:
+  reduce ((gsub("\\*\\*"; "") | split("\n") | .[] | rtrimstr("\r"))
+          | select(test("^\\s*([-*+]|[0-9]+\\.)\\s+(\\[[ xX]\\]\\s+)?#[0-9]+")) | refs | .[0]) as $x
+    ([]; if index($x) then . else . + [$x] end);
 def deps:
   reduce ((.body // "") | gsub("\\*\\*"; "") | split("\n") | .[] | rtrimstr("\r")) as $l ({in: false, refs: []};
     if ($l | test("^\\s*(#+\\s+)?depends on\\b"; "i")) then .in = true | .refs += ($l | refs)
@@ -394,8 +419,8 @@ def run_state:
   # Oldest ready label first, then lowest issue number. With a release path (an open issue naming
   # the ones to run), only the issues it lists start, in the order it lists them: an off-list
   # ready issue is left alone, with no hold or stop. A closed path issue is no path.
-  | (if $release_path == null then null
-     else ([$issues[0][] | select(.number == $release_path)] | first | if . == null then null else [.body // "" | refs] | .[0] | reduce .[] as $x ([]; if index($x) then . else . + [$x] end) end)
+  | (if $release_path == null or $release_closed then null
+     else ([$issues[0][] | select(.number == $release_path)] | first | .body // "" | path_refs)
      end) as $path
   | ($cands | map(select(.ready and .run == null))
      | if $path == null then sort_by(.since, .n)

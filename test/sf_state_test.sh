@@ -1032,7 +1032,62 @@ test_release_path_issue_closed_changes_nothing() {
   issues "[$(ready_issue_json 5), $(ready_issue_json 30)]"
   readied 5
   readied 30
+  printf 'CLOSED\n' | fixture gh issue view 90 -R "$REPO" --json state --jq .state
   assert_eq '[{"action":"start","issue":5},{"action":"start","issue":30}]' "$(state)" "actions"
+}
+
+# fails_closed <message part>: sf-state exits 1, prints nothing, and names the failure.
+fails_closed() {
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "$1"
+}
+
+test_release_path_issue_missing_starts_nothing() {
+  world
+  printf 'factory-release-path: #9999\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5)]"
+  readied 5
+  fixture_fail gh issue view 9999 -R "$REPO" --json state --jq .state
+  fails_closed "factory-release-path #9999 not found"
+}
+
+test_release_path_issue_open_but_unlisted_starts_nothing() {
+  world
+  printf 'factory-release-path: #90\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5)]"
+  readied 5
+  printf 'OPEN\n' | fixture gh issue view 90 -R "$REPO" --json state --jq .state
+  fails_closed "#90 is [OPEN] but not in the open issue list"
+}
+
+test_release_path_key_that_is_not_one_issue_reference_starts_nothing() {
+  world
+  issues "[$(ready_issue_json 5)]"
+  readied 5
+  for key in '#0' '#007' 'abc' '' '#12 #13'; do
+    printf 'factory-release-path: %s\n' "$key" > CLAUDE.md
+    fails_closed "not exactly one issue reference"
+  done
+}
+
+test_release_path_bad_key_line_before_a_valid_one_starts_nothing() {
+  world
+  printf 'factory-release-path: oops\nfactory-release-path: #90\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5), {\"number\":90,\"labels\":[],\"body\":\"- #5\"}]"
+  readied 5
+  fails_closed "found 2 key lines"
+}
+
+test_release_path_counts_only_list_lines_not_prose() {
+  world
+  printf 'factory-release-path: #90\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5), $(ready_issue_json 6), $(ready_issue_json 7), $(ready_issue_json 8),
+    {\"number\":90,\"labels\":[],\"body\":\"# Release #8\\nSee #6 for background; not #7.\\n\\n- [ ] #5 first\\n* #8\"}]"
+  for n in 5 6 7 8; do readied $n; done
+  assert_eq '[{"action":"start","issue":5},{"action":"start","issue":8}]' "$(state)" "actions"
 }
 
 test_a_consult_marker_changes_no_action() {
