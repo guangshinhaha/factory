@@ -16,8 +16,6 @@
 # Replies that change between calls: <key>.1.out, <key>.2.out, ... (each with its own
 # optional .err/.exit) are replayed in order, one per call; the last repeats.
 # Stdin: when an arg is "-" (gh's --body-file -), stdin is appended to $FAKE_LOG.stdin.
-set -u
-
 mkkey() {
   k=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
   if [ "${#k}" -gt 200 ]; then
@@ -25,6 +23,11 @@ mkkey() {
   fi
   printf '%s\n' "$k"
 }
+
+# test/lib.sh sources this file with FAKE_CLI_LIB set to get mkkey in-process (no sh per fixture).
+[ -n "${FAKE_CLI_LIB:-}" ] && return 0
+
+set -u
 
 if [ "${1:-}" = --key ]; then
   shift

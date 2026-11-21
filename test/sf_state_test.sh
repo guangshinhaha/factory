@@ -8,7 +8,7 @@ REPO=acme/app
 fixture() {
   tool=$1
   shift
-  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@")
+  key=$(mkkey "$@")
   mkdir -p "$FAKE_FIXTURES/$tool"
   cat > "$FAKE_FIXTURES/$tool/$key.out"
 }
