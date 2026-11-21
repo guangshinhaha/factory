@@ -214,24 +214,33 @@ jq -r --arg repo "$repo" --slurpfile runs "$tmp/runs.jsonl" '
     else empty end' "$tmp/issues.json" > "$tmp/timeline-issues.raw" \
   || die "open issues not read: the issue list has an unexpected shape"
 tr -d '\r' < "$tmp/timeline-issues.raw" > "$tmp/timeline-issues"
+# One pass per timeline checks it whole and writes {n, events}: gh's pages are arrays, every event an
+# object, a ready issue has a `ready` label event, and every label, reopened and comment event has a UTC
+# time. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
 while read -r n kind; do
   gh api "repos/$repo/issues/$n/timeline" --paginate > "$tmp/timeline" \
     || die "timeline of #$n not read (gh api failed)"
-  jq -cs --argjson n "$n" 'if length > 0 and all(.[]; type == "array") then {n: $n, events: add} else error end' \
-    "$tmp/timeline" > "$tmp/timeline.json" 2> /dev/null \
-    || die "timeline of #$n not read: gh api printed no JSON array"
-  jq -e '.events | all(.[]; type == "object")' "$tmp/timeline.json" > /dev/null \
-    || die "timeline of #$n has an event that is not an object"
-  if [ "$kind" = ready ]; then
-    jq -e 'any(.events[]; .event == "labeled" and .label.name == "ready")' "$tmp/timeline.json" > /dev/null \
-      || die "timeline of #$n has no ready label event"
-  fi
-  jq -e '[.events[] | select(.event == "labeled") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a label event with no UTC time"
-  jq -e '[.events[] | select(.event == "reopened") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a reopened event with no UTC time"
-  jq -e '[.events[] | select(.event == "commented") | .created_at] | all(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' \
-    "$tmp/timeline.json" > /dev/null || die "timeline of #$n has a comment with no UTC time"
+  jq -cs --argjson n "$n" --arg kind "$kind" '
+    def utc: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$");
+    if length > 0 and all(.[]; type == "array") then {n: $n, events: add} else error("sf-state:array") end
+    | if (.events | all(.[]; type == "object")) | not then error("sf-state:object")
+      elif $kind == "ready" and (any(.events[]; .event == "labeled" and .label.name == "ready") | not) then error("sf-state:ready")
+      elif ([.events[] | select(.event == "labeled") | .created_at] | all(utc)) | not then error("sf-state:labeled")
+      elif ([.events[] | select(.event == "reopened") | .created_at] | all(utc)) | not then error("sf-state:reopened")
+      elif ([.events[] | select(.event == "commented") | .created_at] | all(utc)) | not then error("sf-state:commented")
+      else . end' \
+    "$tmp/timeline" > "$tmp/timeline.json" 2> "$tmp/jq.err" || {
+    jq_why=''
+    read -r jq_why < "$tmp/jq.err" || :
+    case "$jq_why" in
+      *sf-state:object*) die "timeline of #$n has an event that is not an object" ;;
+      *sf-state:ready*) die "timeline of #$n has no ready label event" ;;
+      *sf-state:labeled*) die "timeline of #$n has a label event with no UTC time" ;;
+      *sf-state:reopened*) die "timeline of #$n has a reopened event with no UTC time" ;;
+      *sf-state:commented*) die "timeline of #$n has a comment with no UTC time" ;;
+      *) die "timeline of #$n not read: gh api printed no JSON array" ;;
+    esac
+  }
   cat "$tmp/timeline.json" >> "$tmp/timelines.jsonl"
 done < "$tmp/timeline-issues"
 
