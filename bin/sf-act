@@ -116,18 +116,78 @@ LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many req
 
 bind() { o run-use --id "$1" --json > /dev/null 2> "$tmp/err" || { log "Run $1 not bound: $(first "$tmp/err")"; return 1; }; }
 
-# load <run>: the Run's tasks, in full, into $tmp/tasks.json.
+# load <run>: the Run's tasks, in full, into $tmp/tasks.json. The one jq that checks them also
+# writes a shell index file (task id -> status, result, title; title -> ids) that tfield, title_of
+# and find_task source with no fork (a file, not variables: create runs load in a subshell). A list with a shape the index can't hold exactly (a duplicate or
+# missing id, a non-string title, deps that aren't whitespace-free strings, a NUL) leaves
+# _idx_ok=0, and the three read the file with jq as before.
 load() {
   o task-list --run "$1" --json --full > "$tmp/tasks.json" 2> "$tmp/err" || { log "tasks of Run $1 not listed: $(first "$tmp/err")"; return 1; }
-  jq -se 'length == 1 and (.[0] | .ok == true and (.result.tasks | type == "array"))' "$tmp/tasks.json" > /dev/null 2>&1 \
-    || { log "tasks of Run $1 not listed: task-list printed no task array"; return 1; }
+  : > "$tmp/idx.sh"
+  jq -sr '
+    def dl: if (.deps | type) == "string" then (.deps | try fromjson catch []) else [] end;
+    if length == 1 and (.[0] | .ok == true and (.result.tasks | type == "array")) then
+      .[0].result.tasks as $ts
+      | if ($ts | all(.[]; type == "object" and (.id | type) == "string"
+              and ((.task_title // .display_name // "") | type) == "string"
+              and (dl | type) == "array" and (dl | all(.[]; type == "string" and test("^[^ \t\n\r\u000c\u000b]+$")))))
+           and ($ts | map(.id) | length == (unique | length))
+           and (($ts | tojson | contains("\\u0000")) | not) then
+          "_idx_ok=1\n_tf_lookup() { _found=1; case $1 in\n"
+          + ($ts | map("\(.id | @sh)) _st=\(.status // "" | tostring | @sh); _rs=\(.result // "" | tostring | @sh); _tt=\(.task_title // .display_name // "" | @sh) ;;\n") | add // "")
+          + "*) _found=0; _st=; _rs=; _tt= ;; esac; }\n_ft_scan() { _ft_title=$1; _ft_p=$2; _ftid=\n"
+          + ($ts | map(select((.task_title // .display_name) != null) | "_ft_t \(.id | @sh) \(.task_title // .display_name | @sh) \(" " + (dl | join(" ")) + " " | @sh)\n") | add // "")
+          + "}\n"
+        else "_idx_ok=0" end
+    else error("sf-act:shape") end' "$tmp/tasks.json" > "$tmp/idx.sh" 2> /dev/null \
+    || { : > "$tmp/idx.sh"; log "tasks of Run $1 not listed: task-list printed no task array"; return 1; }
 }
-tfield() { jq -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
-title_of() { jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | .task_title // .display_name // ""' "$tmp/tasks.json"; }
-# find_task <title> [parent]: the id of the task with this title (whose deps hold parent).
-find_task() {
+# _idx: source the index of the last load (empty or missing leaves _idx_ok=0).
+# The index defines _tf_lookup (sets _found _st _rs _tt) and _ft_scan (calls _ft_t per task).
+# shellcheck disable=SC1091,SC2154,SC2329 # sourced at run time; its variables and callbacks are set there
+_idx() { _idx_ok=0; [ ! -f "$tmp/idx.sh" ] || . "$tmp/idx.sh"; }
+# shellcheck disable=SC2154,SC2329 # called from the sourced index; _ft_title and _ft_p come from _ft_scan
+_ft_t() {
+  [ "$2" = "$_ft_title" ] || return 0
+  if [ -z "$_ft_p" ]; then _ftid=$1; return 0; fi
+  _ft_pat=" $_ft_p "
+  case $3 in *"$_ft_pat"*) _ftid=$1 ;; esac
+}
+tfield_jq() { jq -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
+title_of_jq() { jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | .task_title // .display_name // ""' "$tmp/tasks.json"; }
+find_task_jq() {
   jq -r --arg title "$1" --arg p "${2:-}" '[.result.tasks[] | select((.task_title // .display_name) == $title)
     | select($p == "" or ((try (.deps | fromjson) catch []) | index($p)))] | last | .id // empty' "$tmp/tasks.json"
+}
+# shellcheck disable=SC2154 # _found _st _rs _tt are set by the sourced index
+tfield() {
+  _idx
+  if [ "$_idx_ok" = 1 ]; then
+    case $2 in
+      status) _tf_lookup "$1"; [ "$_found" = 1 ] && printf '%s\n' "$_st"; return 0 ;;
+      result) _tf_lookup "$1"; [ "$_found" = 1 ] && printf '%s\n' "$_rs"; return 0 ;;
+    esac
+  fi
+  tfield_jq "$1" "$2"
+}
+# shellcheck disable=SC2154 # _found and _tt are set by the sourced index
+title_of() {
+  _idx
+  if [ "$_idx_ok" = 1 ]; then
+    _tf_lookup "$1"; [ "$_found" = 1 ] && printf '%s\n' "$_tt"; return 0
+  fi
+  title_of_jq "$1"
+}
+# find_task <title> [parent]: the id of the task with this title (whose deps hold parent).
+find_task() {
+  _idx
+  if [ "$_idx_ok" = 1 ]; then
+    case ${2:-} in
+      *[[:space:]]*) ;;
+      *) _ft_scan "$1" "${2:-}"; [ -z "$_ftid" ] || printf '%s\n' "$_ftid"; return 0 ;;
+    esac
+  fi
+  find_task_jq "$1" "${2:-}"
 }
 
 # create <run> <title> <deps json> [parent]: create the task (spec on stdin) unless a task with
