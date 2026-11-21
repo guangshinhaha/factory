@@ -187,12 +187,19 @@ while :; do
     created=${created%"$cr"}
     orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
-    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" \
-      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string"))) | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}' \
-      "$tmp/tasks" > "$tmp/run.json" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+    # One pass checks the task list whole and prints whether the Run's inbox is wanted (below), then the Run.
+    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" --arg p "factory $repo#" \
+      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string")))
+       | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}
+       | (any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))), .' \
+      "$tmp/tasks" > "$tmp/run.rows" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+    { IFS= read -r want || :
+      IFS= read -r runline || :
+    } < "$tmp/run.rows"
+    printf '%s\n' "$runline" > "$tmp/run.json"
     # A dispatched task's worker may have stopped without reporting: Orca says so in the Run inbox.
     # Only a factory Run of this repo is acted on, so only its inbox is read.
-    if jq -e --arg p "factory $repo#" 'any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))' "$tmp/run.json" > /dev/null; then
+    if [ "${want%"$cr"}" = true ]; then
       orca orchestration inbox --terminal "run:$id" --limit 500 --json --full > "$tmp/inbox" \
         || die "inbox of Run $id not read (orca orchestration inbox failed)"
       jq -c -s -e --slurpfile run "$tmp/run.json" \
