@@ -51,21 +51,38 @@ if [ -f "$ORCA_SIM/fail/$cmd" ]; then
   fi
 fi
 
-# Flags into $flags (JSON object); --json, --full, --no-parent and --delete-branch take no value.
-flags='{}'
+# Flags into shell variables flag_<name> (dashes become underscores), read back by fl; no process
+# is spawned. --json, --full, --no-parent, --delete-branch, --all and --tab take no value.
+flagvar() {
+  fv=
+  fk=$1
+  while :; do
+    case "$fk" in
+      *-*) fv=$fv${fk%%-*}_ fk=${fk#*-} ;;
+      *) fv=flag_$fv$fk; break ;;
+    esac
+  done
+}
 while [ $# -gt 0 ]; do
   case "$1" in
-    --json | --full | --no-parent | --delete-branch | --all | --tab) flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" '.[$k] = true') ;;
+    --json | --full | --no-parent | --delete-branch | --all | --tab)
+      flagvar "${1#--}"
+      eval "$fv=true"
+      ;;
     --*)
       [ $# -ge 2 ] || die "$1 needs a value"
-      flags=$(printf '%s' "$flags" | jq -c --arg k "${1#--}" --arg v "$2" '.[$k] = $v')
+      flagvar "${1#--}"
+      eval "$fv=\$2"
       shift
       ;;
     *) die "unexpected argument $1" ;;
   esac
   shift
 done
-fl() { printf '%s' "$flags" | jq -r --arg k "$1" '.[$k] // empty'; }
+fl() {
+  flagvar "$1"
+  eval "printf '%s\n' \"\${$fv:-}\""
+}
 
 # Pending tasks whose deps are all completed turn ready.
 PROMOTE='def promote: .tasks as $all | .tasks |= map(if .status == "pending" and all(.deps[]; . as $d | any($all[]; .id == $d and .status == "completed")) then .status = "ready" else . end);'
