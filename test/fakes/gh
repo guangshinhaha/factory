@@ -1,3 +1,6 @@
 #!/bin/sh
 # Fake gh for tests: replays fixtures and logs every call (see fake-cli).
-exec sh "$(dirname "$0")/fake-cli" gh "$@"
+# Runs fake-cli in this process (no second sh, no dirname).
+set -- gh "$@"
+# shellcheck source=test/fakes/fake-cli
+. "${0%/*}/fake-cli"
