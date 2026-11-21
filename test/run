@@ -17,11 +17,12 @@ if [ $# -eq 0 ]; then
 fi
 
 
-# write_guard <dir> <tool> <log>
+# write_guard <dir> <tool>: logs to the file named by $FACTORY_GUARD_LOG, which run_unit sets per test,
+# so one guard dir serves every test.
 write_guard() {
   cat > "$1/$2" <<GUARD
 #!/bin/sh
-printf '%s\n' "$2 \$*" >> "$3"
+printf '%s\n' "$2 \$*" >> "\$FACTORY_GUARD_LOG"
 echo "guard: real $2 reached (no fake $2 on PATH): $2 \$*" >&2
 exit 99
 GUARD
@@ -39,18 +40,15 @@ run_unit() {
     : > "$results/$uid.done"
     return 0
   }
-  mkdir "$tmp/guard" "$tmp/work"
-  write_guard "$tmp/guard" gh "$tmp/guard.log"
-  write_guard "$tmp/guard" orca "$tmp/guard.log"
-  write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
-  write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
+  mkdir "$tmp/work"
   : > "$tmp/calls.log"
   (
     FACTORY_ROOT=$root
     FAKE_LOG=$tmp/calls.log
     FAKE_FIXTURES=
+    FACTORY_GUARD_LOG=$tmp/guard.log
     TEST_TMP=$tmp/work
-    PATH=$fakes:$tmp/guard:$PATH
+    PATH=$fakes:$results/guard:$PATH
     # Even a real gh that slipped past the guard would have no credentials.
     # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
     GH_CONFIG_DIR=$tmp/work/gh-config
@@ -59,7 +57,7 @@ run_unit() {
     unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
     # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
-    export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
+    export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES FACTORY_GUARD_LOG TEST_TMP PATH GH_CONFIG_DIR HOME
     # shellcheck source=test/lib.sh
     . "$root/test/lib.sh"
     # shellcheck disable=SC1090
@@ -92,6 +90,11 @@ case "$jobs" in '' | *[!0-9]* | 0) jobs=2 ;; esac
 
 results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
 trap 'rm -rf "$results"' EXIT
+
+mkdir "$results/guard" || exit 1
+for tool in gh orca gantry-gate-evidence gantry-verdict-check; do
+  write_guard "$results/guard" "$tool"
+done
 
 # One git origin + checkout for the act world (test/act_world.sh), copied by each test's world().
 # A failed build leaves no template, so world() falls back to building its own.
