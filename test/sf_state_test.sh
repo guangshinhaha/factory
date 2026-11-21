@@ -1058,8 +1058,18 @@ test_release_path_issue_missing_starts_nothing() {
   printf 'factory-release-path: #9999\n' > CLAUDE.md
   issues "[$(ready_issue_json 5)]"
   readied 5
-  fixture_fail gh issue view 9999 -R "$REPO" --json state --jq .state
+  fixture gh issue view 9999 -R "$REPO" --json state --jq .state < /dev/null
+  fixture_exit 1 "GraphQL: Could not resolve to an issue or pull request with the number of 9999."
   fails_closed "factory-release-path #9999 not found"
+}
+
+test_release_path_issue_unread_for_an_unknown_cause_is_not_called_not_found() {
+  world
+  printf 'factory-release-path: #90\n' > CLAUDE.md
+  issues "[$(ready_issue_json 5)]"
+  readied 5
+  fixture_fail gh issue view 90 -R "$REPO" --json state --jq .state
+  fails_closed "factory-release-path #90 not read (gh issue view failed: HTTP 502: Bad Gateway)"
 }
 
 test_release_path_issue_open_but_unlisted_starts_nothing() {

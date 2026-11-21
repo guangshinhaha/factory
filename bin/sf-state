@@ -112,8 +112,13 @@ dup=$(jq -rs '
 # or unresolvable (missing, mistyped, or past the list limit): the latter starts nothing.
 release_closed=false
 if [ "$release_path" != null ] && ! jq -e --argjson n "$release_path" 'any(.[]; .number == $n)' "$tmp/issues.json" > /dev/null; then
-  rp_state=$(gh issue view "$release_path" -R "$repo" --json state --jq .state 2> /dev/null) \
-    || die "factory-release-path #$release_path not found in $repo, so no issue starts"
+  rp_state=$(gh issue view "$release_path" -R "$repo" --json state --jq .state 2> "$tmp/rp.err") || {
+    rp_why=$(tr '\n' ' ' < "$tmp/rp.err" | cut -c1-200)
+    case "$rp_why" in
+      *"Could not resolve"* | *"not found"* | *"HTTP 404"*) die "factory-release-path #$release_path not found in $repo, so no issue starts" ;;
+      *) die "factory-release-path #$release_path not read (gh issue view failed: ${rp_why% }), so no issue starts" ;;
+    esac
+  }
   [ "$rp_state" = CLOSED ] \
     || die "factory-release-path #$release_path is [$rp_state] but not in the open issue list, so no issue starts"
   release_closed=true
