@@ -1166,3 +1166,31 @@ test_consult_label_not_added_stops_before_ship() {
   act
   assert_eq 0 "$(count_calls "sf-ship")" "sf-ship calls"
 }
+
+# ---- a consult-held merge resumes (#82) -------------------------------------------------------------
+
+test_a_consult_held_park_keeps_ship_open_with_no_debrief_and_the_next_fire_merges() {
+  world
+  to_ship
+  printf 'sf-ship: #7 is labelled consult-shin: PR #12 left for the owner\nHELD: consult-shin\nPARKED\n' > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  acts
+  assert_called "sf-ship --repo acme/app 7 12"
+  assert_eq ready "$(status_of ship)" "ship while held"
+  assert_eq none "$(status_of debrief)" "debrief while held"
+  # A person removed the label: sf-ship merges on the next fire.
+  echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
+  acts
+  assert_eq 2 "$(count_calls sf-ship)" "sf-ship calls"
+  assert_eq completed "$(status_of ship)" "ship after the label is removed"
+  assert_eq dispatched "$(status_of debrief)" "debrief after the merge"
+}
+
+test_a_supervised_park_without_a_hold_still_completes_ship() {
+  world
+  to_ship
+  printf 'sf-ship: PR #12 left ready for review\nPARKED\n' > "$TEST_TMP/sf-ship.out"
+  finish verify "$VERIFIED"
+  acts
+  assert_eq completed "$(status_of ship)" "ship"
+}

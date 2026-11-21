@@ -664,6 +664,12 @@ step_ship() {
   last=$(awk 'NF { l = $0 } END { print l }' "$tmp/ship")
   case $rc in
     0)
+      # A consult-shin hold is not done: the task stays ready and the next fire merges once a person
+      # removes the label (#82). A supervised park (no hold line) is done: the person merges by hand.
+      if [ "$last" = PARKED ] && awk 'NF { p = l; l = $0 } END { exit !(p == "HELD: consult-shin") }' "$tmp/ship"; then
+        log "#$issue: held by consult-shin; ship resumes once the label is removed"
+        return 0
+      fi
       case "$last" in MERGED\ *) stage merge ;; esac
       queue_debrief "$1" "$2"
       done_with "$2" "$last"

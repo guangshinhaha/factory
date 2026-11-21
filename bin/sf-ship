@@ -34,6 +34,7 @@
 #     attempt count on GitHub records the rerun, so it happens once per head across fires.
 #
 # Stopping runs sf-stop, so the issue ends `needs-shin` with the reason.
+# A consult hold prints `HELD: consult-shin` just before `PARKED`; sf-act then keeps the Run in ship.
 # Last line of stdout: `MERGED <sha>`, `PARKED`, `STOPPED: <reason>`, `RETRY: <reason>` or
 # `REREVIEW: <reason>`.
 # Exit 0: merged (now or already) or parked. 1: stopped (when sf-stop itself failed, fail the
@@ -162,6 +163,7 @@ consult_held() {
 }
 if consult_held "$labels"; then
   echo "$me: #$issue is labelled consult-shin: PR #$pr left for the owner until the label is removed"
+  echo "HELD: consult-shin"
   echo "PARKED"
   exit 0
 fi
@@ -293,6 +295,7 @@ while :; do
     || retry "labels of #$issue not read (gh issue view failed)"
   if consult_held "$labels"; then
     echo "$me: #$issue was labelled consult-shin during ship: PR #$pr left for the owner until the label is removed"
+    echo "HELD: consult-shin"
     echo "PARKED"
     exit 0
   fi
