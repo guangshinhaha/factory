@@ -33,6 +33,9 @@
 #     wait again and retry the merge; refused again: stop with gh's refusal text. The run's
 #     attempt count on GitHub records the rerun, so it happens once per head across fires.
 #
+#     Also when the PR reads clean but origin/<base> changed a file the PR changed since it forked
+#     (a clean merge can still duplicate content): same rebase, REREVIEW names the files (#76).
+#
 # Stopping runs sf-stop, so the issue ends `needs-shin` with the reason.
 # A consult hold prints `HELD: consult-shin` just before `PARKED`; sf-act then keeps the Run in ship.
 # Last line of stdout: `MERGED <sha>`, `PARKED`, `STOPPED: <reason>`, `RETRY: <reason>` or
@@ -246,7 +249,17 @@ wait_mergeable() {
   done
 }
 
-# --- 6. Conflict: rebase once ------------------------------------------------------------------
+# --- 6. Conflict, or base moved on a shared file: rebase once ------------------------------------------------------------------
+# base_overlap: print the files both the PR (since it forked) and origin/<base> (since then) changed.
+# A clean merge of those can still duplicate content, and the review and CI ran before it (#76).
+base_overlap() {
+  git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
+  fork=$(git merge-base "$start_head" "origin/$base") || retry "merge base of $start_head and origin/$base not read (git merge-base failed)"
+  git diff --name-only "$fork" "$start_head" | sort > "$tmp/ours" || retry "files of $start_head not listed (git diff failed)"
+  git diff --name-only "$fork" "origin/$base" | sort > "$tmp/theirs" || retry "files of origin/$base not listed (git diff failed)"
+  comm -12 "$tmp/ours" "$tmp/theirs" | tr '\n' ' ' | sed 's/ $//'
+}
+
 rebase_once() {
   marks=$(markers_since_ready "$repo" "$issue") || retry "timeline of #$issue not read (gh api failed)"
   if printf '%s\n' "$marks" | jq -e 'any(.[]; .kind == "rebase")' > /dev/null; then
@@ -260,6 +273,8 @@ rebase_once() {
     stop "rebase of PR #$pr onto $base conflicts in: ${files:-$(tr '\n' ' ' < "$tmp/rebase")}"
   fi
   new_head=$(git rev-parse HEAD)
+  note=
+  [ -z "${1:-}" ] || note="; $base also changed $1"
   status=0
   # shellcheck disable=SC2086 # $bug is empty or one flag
   gantry-gate-evidence $bug --force-with-lease > "$tmp/gate" 2>&1 || status=$?
@@ -279,11 +294,11 @@ rebase_once() {
       ;;
   esac
   marker=$(jq -cn --argjson pr "$pr" --arg from "$start_head" --arg to "$new_head" '{kind: "rebase", pr: $pr, from: $from, to: $to}')
-  printf 'factory: rebased PR #%s onto %s (%s -> %s); review and verify rerun on the new head.\n\n<!-- factory:%s -->\n' \
-    "$pr" "$base" "$start_head" "$new_head" "$marker" \
+  printf 'factory: rebased PR #%s onto %s (%s -> %s)%s; review and verify rerun on the new head.\n\n<!-- factory:%s -->\n' \
+    "$pr" "$base" "$start_head" "$new_head" "$note" "$marker" \
     | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
     || stop "rebase marker not posted on #$issue after pushing $new_head (gh issue comment failed)"
-  echo "REREVIEW: PR #$pr rebased onto $base, now at $new_head"
+  echo "REREVIEW: PR #$pr rebased onto $base, now at $new_head$note"
   exit 3
 }
 
@@ -291,6 +306,9 @@ rebase_once() {
 reran=0
 while :; do
   wait_mergeable || rebase_once
+  # Clean, but origin/<base> moved on files this PR also changed: rebase and rerun the gates at the new head.
+  overlap=$(base_overlap) || exit $?
+  [ -z "$overlap" ] || rebase_once "$overlap"
   labels=$(gh issue view "$issue" -R "$repo" --json labels -q '[.labels[].name] | join(",")') \
     || retry "labels of #$issue not read (gh issue view failed)"
   if consult_held "$labels"; then

@@ -377,6 +377,58 @@ test_first_conflict_rebases_pushes_with_lease_and_asks_for_rereview() {
   assert_eq 0 "$(count_calls "gh issue edit")" "label edits"
 }
 
+# origin/main and app-7 both edit shared.txt (different ends, so the rebase has no conflict) while
+# GitHub still reads the PR as clean: the pre-merge review and CI cover a head main has moved past.
+overlap_world() {
+  world auto
+  printf 'top\nmid\nbottom\n' > shared.txt
+  git add shared.txt && git_q commit -m "shared base"
+  git_q push origin app-7
+  git_q checkout main
+  git_q reset --hard origin/main
+  printf 'top\nmid\nbottom\n' > shared.txt
+  git add shared.txt && git_q commit -m "shared base on main"
+  git_q push origin main
+  git_q checkout app-7
+  git_q rebase main
+  git_q push --force origin app-7
+  printf 'top\nmid\nbottom\nfrom app-7\n' > shared.txt
+  git add shared.txt && git_q commit -m "app-7 edits shared.txt"
+  git_q push --force origin app-7
+  HEAD_SHA=$(git rev-parse HEAD)
+  git_q checkout main
+  printf 'from main\ntop\nmid\nbottom\n' > shared.txt
+  git add shared.txt && git_q commit -m "main edits shared.txt"
+  git_q push origin main
+  git_q checkout app-7
+  git_q branch -f main "$HEAD_SHA"
+}
+
+test_clean_pr_whose_base_moved_on_a_shared_file_rebases_and_asks_for_rereview() {
+  overlap_world
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
+  pr OPEN false MERGEABLE CLEAN
+  echo "PASS: pushed" | fixture gantry-gate-evidence --force-with-lease
+  ship_status
+  assert_eq 3 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  new_head=$(git rev-parse HEAD)
+  assert_eq "REREVIEW: PR #9 rebased onto main, now at $new_head; main also changed shared.txt" "$(last_line)" "result"
+  git merge-base --is-ancestor origin/main HEAD || fail "HEAD is not on top of origin/main"
+  assert_contains "$(fake_stdin)" "main also changed shared.txt"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_clean_pr_whose_base_moved_on_other_files_still_merges() {
+  world auto
+  advance_main
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  ship_status
+  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_eq "MERGED abc123" "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "--force-with-lease")" "pushes"
+}
+
 test_behind_base_also_rebases() {
   world auto
   advance_main
