@@ -17,7 +17,24 @@
 # optional .err/.exit) are replayed in order, one per call; the last repeats.
 # Stdin: when an arg is "-" (gh's --body-file -), stdin is appended to $FAKE_LOG.stdin.
 mkkey() {
-  k=$(printf '%s' "$*" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+  # Pure sh: one pass per byte to replace, no tr. C locale so a multibyte char is several bytes, as tr sees it.
+  mk_had=${LC_ALL+x} mk_old=${LC_ALL-}
+  LC_ALL=C
+  mk_rest=$*
+  k=
+  while :; do
+    case $mk_rest in
+      *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)
+        k=$k${mk_rest%%[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*}_
+        mk_rest=${mk_rest#*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]}
+        ;;
+      *)
+        k=$k$mk_rest
+        break
+        ;;
+    esac
+  done
+  if [ -n "$mk_had" ]; then LC_ALL=$mk_old; else unset LC_ALL; fi
   if [ "${#k}" -gt 200 ]; then
     k=$(printf '%s' "$k" | cut -c1-150)-$(printf '%s' "$*" | cksum | cut -d' ' -f1)
   fi
