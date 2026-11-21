@@ -1,3 +1,6 @@
 #!/bin/sh
 # Fake gantry-gate-evidence for tests: replays fixtures and logs every call (see fake-cli).
-exec sh "$(dirname "$0")/fake-cli" gantry-gate-evidence "$@"
+# Runs fake-cli in this process (no second sh, no dirname).
+set -- gantry-gate-evidence "$@"
+# shellcheck source=test/fakes/fake-cli
+. "${0%/*}/fake-cli"

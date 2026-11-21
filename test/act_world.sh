@@ -29,6 +29,19 @@ STUB
   chmod +x "$TEST_TMP/bin/$1"
 }
 
+# act_world_repos <dir>: <dir>/origin.git (bare) and <dir>/app (clone on main, CLAUDE.md pushed); cd into app.
+# test/run builds one in $ACT_WORLD_TEMPLATE for world() to copy.
+act_world_repos() {
+  git_q init --bare "$1/origin.git"
+  git -C "$1/origin.git" symbolic-ref HEAD refs/heads/main
+  git_q clone "$1/origin.git" "$1/app"
+  cd "$1/app" || fail "checkout not entered"
+  git_q checkout -b main
+  printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
+  git add CLAUDE.md && git_q commit -m init && git_q push -u origin main
+  git_q remote set-head origin -a
+}
+
 # world: issue 7 is ready and has no Run; origin/main has CLAUDE.md; the checkout is main.
 world() {
   FAKE_FIXTURES=$TEST_TMP/fx
@@ -47,14 +60,14 @@ world() {
   PATH=$TEST_TMP/bin:$PATH
   export PATH
 
-  git_q init --bare "$TEST_TMP/origin.git"
-  git -C "$TEST_TMP/origin.git" symbolic-ref HEAD refs/heads/main
-  git_q clone "$TEST_TMP/origin.git" "$TEST_TMP/app"
-  cd "$TEST_TMP/app" || fail "checkout not entered"
-  git_q checkout -b main
-  printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
-  git add CLAUDE.md && git_q commit -m init && git_q push -u origin main
-  git_q remote set-head origin -a
+  if [ -d "${ACT_WORLD_TEMPLATE:-}/app" ]; then
+    # test/run built the repos once; a copy plus one set-url is cheaper than seven git runs.
+    cp -R "$ACT_WORLD_TEMPLATE/origin.git" "$ACT_WORLD_TEMPLATE/app" "$TEST_TMP/"
+    git -C "$TEST_TMP/app" remote set-url origin "$TEST_TMP/origin.git"
+    cd "$TEST_TMP/app" || fail "checkout not entered"
+  else
+    act_world_repos "$TEST_TMP"
+  fi
 
   issues '[{"number":7,"labels":[{"name":"ready"}],"body":"Done when: it greets"}]'
   prs '[]'

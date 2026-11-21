@@ -93,6 +93,29 @@ case "$jobs" in '' | *[!0-9]* | 0) jobs=2 ;; esac
 results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
 trap 'rm -rf "$results"' EXIT
 
+# One git origin + checkout for the act world (test/act_world.sh), copied by each test's world().
+# A failed build leaves no template, so world() falls back to building its own.
+make_act_world_template() {
+  mkdir "$1" "$results/home" || return 1
+  (
+    FACTORY_ROOT=$root HOME=$results/home
+    GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT HOME GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    # shellcheck source=/dev/null
+    . "$root/test/lib.sh"
+    # shellcheck source=/dev/null
+    . "$root/test/act_world.sh"
+    set -e
+    act_world_repos "$1"
+  ) > /dev/null 2>&1
+}
+ACT_WORLD_TEMPLATE=$results/act-world
+export ACT_WORLD_TEMPLATE
+if [ -f "$root/test/act_world.sh" ]; then
+  if ! make_act_world_template "$ACT_WORLD_TEMPLATE"; then rm -rf "$ACT_WORLD_TEMPLATE"; fi
+fi
+
 passed=0
 failed=0
 
@@ -124,6 +147,7 @@ total=0
 # finishes (completion order), so a timeout still shows progress.
 next=1
 pending=""
+nap=0.2
 active=0
 printed=0
 while [ "$printed" -lt "$total" ]; do
@@ -152,7 +176,14 @@ UNIT
     fi
   done
   pending=$still
-  [ "$progress" -eq 1 ] || sleep 0.2
+  # Every poll that finds nothing costs a sleep process, so the wait grows to 1s while no test
+  # finishes and resets when one does.
+  if [ "$progress" -eq 1 ]; then
+    nap=0.2
+  else
+    sleep "$nap"
+    case "$nap" in 0.2) nap=0.5 ;; 0.5) nap=1 ;; esac
+  fi
 done
 wait
 

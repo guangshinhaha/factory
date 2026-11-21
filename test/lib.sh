@@ -6,6 +6,11 @@
 #   TEST_TMP       scratch dir for this test, removed afterwards
 # PATH starts with the fakes dir, then a guard dir whose gh/orca fail the test.
 
+# mkkey: the fakes' fixture key function, loaded once here instead of one `sh fake-cli --key` per call.
+# shellcheck source=/dev/null # not followed: fake-cli exits, which would mark the rest of this file unreachable
+FAKE_CLI_LIB=1 . "$FACTORY_ROOT/test/fakes/fake-cli"
+unset FAKE_CLI_LIB
+
 # Point the fakes at test/fixtures/<name>.
 use_fixtures() {
   FAKE_FIXTURES="$FACTORY_ROOT/test/fixtures/$1"
@@ -53,7 +58,7 @@ assert_not_called() {
 fixture() {
   tool=$1
   shift
-  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@")
+  key=$(mkkey "$@")
   mkdir -p "$FAKE_FIXTURES/$tool"
   for f in "$FAKE_FIXTURES/$tool/$key".*; do
     case "${f##*/}" in "$key".out | "$key".err | "$key".exit | "$key".calls | "$key".[0-9]*) rm -f "$f" ;; esac
@@ -73,7 +78,7 @@ fixture_seq() {
   n=$1
   tool=$2
   shift 2
-  key=$(sh "$FACTORY_ROOT/test/fakes/fake-cli" --key "$@").$n
+  key=$(mkkey "$@").$n
   mkdir -p "$FAKE_FIXTURES/$tool"
   cat > "$FAKE_FIXTURES/$tool/$key.out"
 }
