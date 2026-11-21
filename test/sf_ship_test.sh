@@ -7,13 +7,8 @@ REPO=acme/app
 READIED='{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"}'
 PR_FIELDS=state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit
 
-git_q() { git -c init.defaultBranch=main -c advice.detachedHead=false "$@" > /dev/null 2>&1; }
-
-# commit <file> <text>: write and commit a file in the current checkout.
-commit() {
-  printf '%s\n' "$2" > "$1"
-  git add "$1" && git_q commit -m "change $1"
-}
+# shellcheck source=test/ship_world.sh
+. "$FACTORY_ROOT/test/ship_world.sh"
 
 # world [mode]: origin/main's CLAUDE.md declares shinstack-mode <mode> (default auto); the
 # checkout is on app-7, one commit ahead and pushed; PR #9 is a green draft; issue #7 is ready.
@@ -21,20 +16,8 @@ world() {
   FAKE_FIXTURES=$TEST_TMP/fx
   SF_SHIP_POLL=0
   export FAKE_FIXTURES SF_SHIP_POLL
-  git_q init --bare "$TEST_TMP/origin.git"
-  git -C "$TEST_TMP/origin.git" symbolic-ref HEAD refs/heads/main
-  git_q clone "$TEST_TMP/origin.git" "$TEST_TMP/app"
+  ship_world_copy "${1:-auto}" "$TEST_TMP"
   cd "$TEST_TMP/app" || fail "checkout not entered"
-  git config user.email test@example.com
-  git config user.name test
-  git_q checkout -b main
-  printf '# app\n\nshinstack-mode: %s\n' "${1:-auto}" > CLAUDE.md
-  git add CLAUDE.md && git_q commit -m init
-  commit shared.txt base
-  git_q push origin main
-  git_q checkout -b app-7
-  commit feature.txt feature
-  git_q push -u origin app-7
   HEAD_SHA=$(git rev-parse HEAD)
 
   pr OPEN true MERGEABLE CLEAN

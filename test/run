@@ -17,11 +17,13 @@ if [ $# -eq 0 ]; then
 fi
 
 
-# write_guard <dir> <tool> <log>
+# write_guard <dir> <tool>: logs to the file named by $FACTORY_GUARD_LOG, which run_unit sets per test,
+# so one guard dir serves every test. A test that unsets the variable still leaves a trace: the shim falls
+# back to $1/unattributed.log, and the run fails if that file is ever non-empty.
 write_guard() {
   cat > "$1/$2" <<GUARD
 #!/bin/sh
-printf '%s\n' "$2 \$*" >> "$3"
+printf '%s\n' "$2 \$*" >> "\${FACTORY_GUARD_LOG:-$1/unattributed.log}"
 echo "guard: real $2 reached (no fake $2 on PATH): $2 \$*" >&2
 exit 99
 GUARD
@@ -39,18 +41,15 @@ run_unit() {
     : > "$results/$uid.done"
     return 0
   }
-  mkdir "$tmp/guard" "$tmp/work"
-  write_guard "$tmp/guard" gh "$tmp/guard.log"
-  write_guard "$tmp/guard" orca "$tmp/guard.log"
-  write_guard "$tmp/guard" gantry-gate-evidence "$tmp/guard.log"
-  write_guard "$tmp/guard" gantry-verdict-check "$tmp/guard.log"
+  mkdir "$tmp/work"
   : > "$tmp/calls.log"
   (
     FACTORY_ROOT=$root
     FAKE_LOG=$tmp/calls.log
     FAKE_FIXTURES=
+    FACTORY_GUARD_LOG=$tmp/guard.log
     TEST_TMP=$tmp/work
-    PATH=$fakes:$tmp/guard:$PATH
+    PATH=$fakes:$results/guard:$PATH
     # Even a real gh that slipped past the guard would have no credentials.
     # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
     GH_CONFIG_DIR=$tmp/work/gh-config
@@ -59,7 +58,7 @@ run_unit() {
     unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
     # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
-    export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES TEST_TMP PATH GH_CONFIG_DIR HOME
+    export FACTORY_ROOT FAKE_LOG FAKE_FIXTURES FACTORY_GUARD_LOG TEST_TMP PATH GH_CONFIG_DIR HOME
     # shellcheck source=test/lib.sh
     . "$root/test/lib.sh"
     # shellcheck disable=SC1090
@@ -93,6 +92,11 @@ case "$jobs" in '' | *[!0-9]* | 0) jobs=2 ;; esac
 results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
 trap 'rm -rf "$results"' EXIT
 
+mkdir "$results/guard" || exit 1
+for tool in gh orca gantry-gate-evidence gantry-verdict-check; do
+  write_guard "$results/guard" "$tool"
+done
+
 # One git origin + checkout for the act world (test/act_world.sh), copied by each test's world().
 # A failed build leaves no template, so world() falls back to building its own.
 make_act_world_template() {
@@ -114,6 +118,52 @@ ACT_WORLD_TEMPLATE=$results/act-world
 export ACT_WORLD_TEMPLATE
 if [ -f "$root/test/act_world.sh" ]; then
   if ! make_act_world_template "$ACT_WORLD_TEMPLATE"; then rm -rf "$ACT_WORLD_TEMPLATE"; fi
+fi
+
+# The same for the ship world (test/ship_world.sh), one template per mode the ship tests use.
+make_ship_world_template() {
+  mkdir "$1-$2" || return 1
+  (
+    FACTORY_ROOT=$root HOME=$results/home
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT HOME
+    # shellcheck source=/dev/null
+    . "$root/test/lib.sh"
+    # shellcheck source=/dev/null
+    . "$root/test/ship_world.sh"
+    set -e
+    ship_world_repos "$2" "$1-$2"
+  ) > /dev/null 2>&1
+}
+SHIP_WORLD_TEMPLATE=$results/ship-world
+export SHIP_WORLD_TEMPLATE
+if [ -f "$root/test/ship_world.sh" ]; then
+  mkdir -p "$results/home"
+  for mode in auto supervised; do
+    if ! make_ship_world_template "$SHIP_WORLD_TEMPLATE" "$mode"; then rm -rf "$SHIP_WORLD_TEMPLATE-$mode"; fi
+  done
+fi
+
+# The same for the init world (test/init_world.sh).
+make_init_world_template() {
+  mkdir "$1" || return 1
+  (
+    FACTORY_ROOT=$root HOME=$results/home
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT HOME
+    # shellcheck source=/dev/null
+    . "$root/test/lib.sh"
+    # shellcheck source=/dev/null
+    . "$root/test/init_world.sh"
+    set -e
+    init_world_repos "$1"
+  ) > /dev/null 2>&1
+}
+INIT_WORLD_TEMPLATE=$results/init-world
+export INIT_WORLD_TEMPLATE
+if [ -f "$root/test/init_world.sh" ]; then
+  mkdir -p "$results/home"
+  if ! make_init_world_template "$INIT_WORLD_TEMPLATE"; then rm -rf "$INIT_WORLD_TEMPLATE"; fi
 fi
 
 passed=0
@@ -186,6 +236,11 @@ UNIT
   fi
 done
 wait
+
+if [ -s "$results/guard/unattributed.log" ]; then
+  echo "FAIL guard: a test reached a real CLI with FACTORY_GUARD_LOG unset: $(tr '\n' ';' < "$results/guard/unattributed.log")"
+  failed=$((failed + 1))
+fi
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

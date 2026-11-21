@@ -8,9 +8,8 @@ LABELS_Q='.[].name'
 PR_URL=https://github.com/acme/app/pull/9
 TITLE='chore: set up the factory (sf-init)'
 
-# Identity by env, never git config.
-GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+# shellcheck source=test/init_world.sh
+. "$FACTORY_ROOT/test/init_world.sh"
 
 # world: origin with CLAUDE.md declaring shinstack-mode, a clone at $WS, a fresh repo on GitHub.
 world() {
@@ -20,23 +19,10 @@ world() {
   PRECHECK="PATH='$PATH' sh '$FACTORY_ROOT/bin/sf-tick'"
   ORIGIN=$TEST_TMP/remote/acme/app.git
   WS=$TEST_TMP/ws
-  mkdir -p "$TEST_TMP/remote/acme" "$TEST_TMP/seed"
-  git init -q --bare "$ORIGIN"
-  git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
-  git init -q "$TEST_TMP/seed"
-  printf '# app\n\n## shinstack\nshinstack-mode: auto\n\n## Other\nkeep me\n' > "$TEST_TMP/seed/CLAUDE.md"
-  seed_commit
-  # Fake ssh: run the remote git command (git-upload-pack 'acme/app.git') in $TEST_TMP/remote.
-  cat > "$TEST_TMP/ssh" <<SSH
-#!/bin/sh
-for a; do cmd=\$a; done
-cd '$TEST_TMP/remote' || exit 1
-eval "\$(printf '%s\\n' "\$cmd" | sed "s|^git-\\([a-z-]*\\) '/*|git \\1 '|")"
-SSH
-  chmod +x "$TEST_TMP/ssh"
+  init_world_copy "$TEST_TMP"
+  init_world_ssh "$TEST_TMP"
   GIT_SSH=$TEST_TMP/ssh
   export GIT_SSH
-  git clone -q git@github.com:acme/app.git "$WS"
   WS=$(git -C "$WS" rev-parse --show-toplevel) # as sf-init sees it (C:/... on Windows)
 
   labels ""
@@ -47,11 +33,6 @@ SSH
   automations '[]'
   echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
     --prompt /factory:foreman --precheck "$PRECHECK" --workspace "path:$WS" --json
-}
-seed_commit() {
-  git -C "$TEST_TMP/seed" add -A
-  git -C "$TEST_TMP/seed" commit -q -m seed
-  git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
 }
 labels() { printf '%s\n' "$1" | fixture gh label list -R "$REPO" --limit 1000 --json name -q "$LABELS_Q"; }
 label_create() {
