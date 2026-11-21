@@ -119,6 +119,30 @@ if [ -f "$root/test/act_world.sh" ]; then
   if ! make_act_world_template "$ACT_WORLD_TEMPLATE"; then rm -rf "$ACT_WORLD_TEMPLATE"; fi
 fi
 
+# The same for the ship world (test/ship_world.sh), one template per mode the ship tests use.
+make_ship_world_template() {
+  mkdir "$1-$2" || return 1
+  (
+    FACTORY_ROOT=$root HOME=$results/home
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+    export FACTORY_ROOT HOME
+    # shellcheck source=/dev/null
+    . "$root/test/lib.sh"
+    # shellcheck source=/dev/null
+    . "$root/test/ship_world.sh"
+    set -e
+    ship_world_repos "$2" "$1-$2"
+  ) > /dev/null 2>&1
+}
+SHIP_WORLD_TEMPLATE=$results/ship-world
+export SHIP_WORLD_TEMPLATE
+if [ -f "$root/test/ship_world.sh" ]; then
+  mkdir -p "$results/home"
+  for mode in auto supervised; do
+    if ! make_ship_world_template "$SHIP_WORLD_TEMPLATE" "$mode"; then rm -rf "$SHIP_WORLD_TEMPLATE-$mode"; fi
+  done
+fi
+
 passed=0
 failed=0
 
