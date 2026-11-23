@@ -232,26 +232,32 @@ done
 # Every Orca worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
 orca worktree ps --json --limit 1000 > "$tmp/worktrees.raw" \
   || die "Orca worktrees not listed (orca worktree ps failed)"
-# One pass checks it (exactly one document) and prints the worktree array.
-jq -sc 'if length == 1 and (.[0] | .ok == true and (.result.worktrees | type == "array") and all(.result.worktrees[]; type == "object")) then .[0].result.worktrees else error("sf-state:shape") end' \
-  "$tmp/worktrees.raw" > "$tmp/worktrees.json" 2> /dev/null || die "Orca worktrees not listed: $(snippet "$tmp/worktrees.raw")"
-
 # Timelines: every ready issue, plus every open issue that is neither ready nor parked
 # (needs-shin, icebox) but has a factory Run, since a dead Run there still owes a stop.
 # A ready issue must have a `ready` label event: without one there is no attempt boundary.
+# One pass checks the worktrees (exactly one document) and prints the worktree array as the first line,
+# then one "<number> ready|run" line per timeline to read. An error before the first line is the
+# worktrees' shape; one after it is the issue list's.
 : > "$tmp/timelines.jsonl"
-jq -r --arg repo "$repo" --slurpfile runs "$tmp/runs.jsonl" '
-  ($repo | ascii_downcase) as $r
+if ! jq -rsc --arg repo "$repo" --slurpfile runs "$tmp/runs.jsonl" --slurpfile issues "$tmp/issues.json" '
+  if length == 1 and (.[0] | .ok == true and (.result.worktrees | type == "array") and all(.result.worktrees[]; type == "object")) then .[0].result.worktrees else error("sf-state:shape") end,
+  (($repo | ascii_downcase) as $r
   | [$runs[] | .objective | ascii_downcase] as $objs
-  | .[] | .number as $n | [.labels[].name] as $l
+  | $issues[0][] | .number as $n | [.labels[].name] as $l
   | select(($l | index("needs-shin") | not) and ($l | index("icebox") | not))
   | if $l | index("ready") then "\($n) ready"
     elif $objs | index("factory \($r)#\($n)") then "\($n) run"
-    else empty end' "$tmp/issues.json" > "$tmp/timeline-issues.raw" \
-  || die "open issues not read: the issue list has an unexpected shape"
+    else empty end)' "$tmp/worktrees.raw" > "$tmp/worktrees.rows" 2> "$tmp/jq.err"; then
+  IFS= read -r wt_line < "$tmp/worktrees.rows" || :
+  [ -n "$wt_line" ] || die "Orca worktrees not listed: $(snippet "$tmp/worktrees.raw")"
+  while IFS= read -r jq_why; do printf '%s\n' "$jq_why" >&2; done < "$tmp/jq.err"
+  die "open issues not read: the issue list has an unexpected shape"
+fi
 # One pass per timeline checks it whole and writes {n, events}: gh's pages are arrays, every event an
 # object, a ready issue has a `ready` label event, and every label, reopened and comment event has a UTC
 # time. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
+{ IFS= read -r wt_line || :
+printf '%s\n' "${wt_line%"$cr"}" > "$tmp/worktrees.json"
 while read -r n kind; do
   n=${n%"$cr"} kind=${kind%"$cr"}
   gh api "repos/$repo/issues/$n/timeline" --paginate > "$tmp/timeline" \
@@ -279,7 +285,8 @@ while read -r n kind; do
   }
   IFS= read -r tlline < "$tmp/timeline.json" || :
   printf '%s\n' "$tlline" >> "$tmp/timelines.jsonl"
-done < "$tmp/timeline-issues.raw"
+done
+} < "$tmp/worktrees.rows"
 
 jq -n -c \
   --arg repo "$repo" \
