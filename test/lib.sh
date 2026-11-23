@@ -59,11 +59,11 @@ fixture() {
   tool=$1
   shift
   key=$(mkkey "$@")
-  mkdir -p "$FAKE_FIXTURES/$tool"
+  [ -d "$FAKE_FIXTURES/$tool" ] || mkdir -p "$FAKE_FIXTURES/$tool"
   for f in "$FAKE_FIXTURES/$tool/$key".*; do
     case "${f##*/}" in "$key".out | "$key".err | "$key".exit | "$key".calls | "$key".[0-9]*) rm -f "$f" ;; esac
   done
-  cat > "$FAKE_FIXTURES/$tool/$key.out"
+  cat_stdin > "$FAKE_FIXTURES/$tool/$key.out"
 }
 
 # fixture_exit <status> [stderr]: the last fixture's call exits <status>, printing stderr.
@@ -80,7 +80,7 @@ fixture_seq() {
   shift 2
   key=$(mkkey "$@").$n
   mkdir -p "$FAKE_FIXTURES/$tool"
-  cat > "$FAKE_FIXTURES/$tool/$key.out"
+  cat_stdin > "$FAKE_FIXTURES/$tool/$key.out"
 }
 
 # count_calls <prefix>: how many logged calls start with <prefix>.

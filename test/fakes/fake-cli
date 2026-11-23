@@ -41,6 +41,12 @@ mkkey() {
   printf '%s\n' "$k"
 }
 
+# cat_stdin: stdin to stdout byte for byte (a last line with no newline stays without), in-process instead of a cat.
+cat_stdin() {
+  while IFS= read -r cs_l; do printf '%s\n' "$cs_l"; done
+  [ -z "$cs_l" ] || printf '%s' "$cs_l"
+}
+
 # test/lib.sh sources this file with FAKE_CLI_LIB set to get mkkey in-process (no sh per fixture).
 [ -n "${FAKE_CLI_LIB:-}" ] && return 0
 
@@ -61,7 +67,7 @@ fi
 
 for arg in "$@"; do
   if [ "$arg" = - ] && [ -n "${FAKE_LOG:-}" ]; then
-    cat >> "$FAKE_LOG.stdin"
+    cat_stdin >> "$FAKE_LOG.stdin"
     break
   fi
 done
@@ -70,7 +76,9 @@ key=$(mkkey "$@")
 base="${FAKE_FIXTURES:-}/$tool/$key"
 
 if [ -n "${FAKE_FIXTURES:-}" ] && [ -f "$base.1.out" ]; then
-  n=$(($(cat "$base.calls" 2> /dev/null || echo 0) + 1))
+  n=0
+  { read -r n; } 2> /dev/null < "$base.calls" || n=0
+  n=$((n + 1))
   echo "$n" > "$base.calls"
   while [ "$n" -gt 1 ] && [ ! -f "$base.$n.out" ]; do n=$((n - 1)); done
   base=$base.$n
@@ -81,7 +89,10 @@ if [ -z "${FAKE_FIXTURES:-}" ] || [ ! -f "$base.out" ]; then
   exit 97
 fi
 
-cat "$base.out"
-if [ -f "$base.err" ]; then cat "$base.err" >&2; fi
-if [ -f "$base.exit" ]; then exit "$(cat "$base.exit")"; fi
+cat_stdin < "$base.out"
+if [ -f "$base.err" ]; then cat_stdin < "$base.err" >&2; fi
+if [ -f "$base.exit" ]; then
+  read -r n < "$base.exit"
+  exit "$n"
+fi
 exit 0

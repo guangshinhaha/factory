@@ -23,8 +23,11 @@ stub() {
   cat > "$TEST_TMP/bin/$1" <<STUB
 #!/bin/sh
 printf '%s\n' "$1 \$*" >> "\$FAKE_LOG"
-if [ -f "\$TEST_TMP/$1.out" ]; then cat "\$TEST_TMP/$1.out"; fi
-exit "\$(cat "\$TEST_TMP/$1.exit" 2> /dev/null || echo 0)"
+FAKE_CLI_LIB=1 . "\$FACTORY_ROOT/test/fakes/fake-cli"
+if [ -f "\$TEST_TMP/$1.out" ]; then cat_stdin < "\$TEST_TMP/$1.out"; fi
+n=0
+{ read -r n; } 2> /dev/null < "\$TEST_TMP/$1.exit" || n=0
+exit "\$n"
 STUB
   chmod +x "$TEST_TMP/bin/$1"
 }
@@ -52,7 +55,7 @@ world() {
   export FACTORY_ACT_LOG FAKE_FIXTURES ORCA_SIM SHINSTACK_ROOT GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   mkdir -p "$FAKE_FIXTURES" "$ORCA_SIM/fail" "$ORCA_SIM/terminal" "$TEST_TMP/bin" "$SHINSTACK_ROOT/playbooks"
   for p in feature bug-fix refactoring opening-a-pr ship plan; do echo "# $p" > "$SHINSTACK_ROOT/playbooks/$p.md"; done
-  printf '#!/bin/sh\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
+  printf '#!/bin/sh\n. "%s/test/fakes/orca-sim"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
   chmod +x "$TEST_TMP/bin/orca"
   stub sf-ship
   stub sf-stop
