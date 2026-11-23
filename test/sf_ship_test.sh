@@ -363,25 +363,26 @@ test_first_conflict_rebases_pushes_with_lease_and_asks_for_rereview() {
 # origin/main and app-7 both edit shared.txt (different ends, so the rebase has no conflict) while
 # GitHub still reads the PR as clean: the pre-merge review and CI cover a head main has moved past.
 overlap_world() {
+  ovf=${1:-shared.txt}
   world auto
-  printf 'top\nmid\nbottom\n' > shared.txt
-  git add shared.txt && git_q commit -m "shared base"
+  printf 'top\nmid\nbottom\n' > "$ovf"
+  git add "$ovf" && git_q commit -m "shared base"
   git_q push origin app-7
   git_q checkout main
   git_q reset --hard origin/main
-  printf 'top\nmid\nbottom\n' > shared.txt
-  git add shared.txt && git_q commit -m "shared base on main"
+  printf 'top\nmid\nbottom\n' > "$ovf"
+  git add "$ovf" && git_q commit -m "shared base on main"
   git_q push origin main
   git_q checkout app-7
   git_q rebase main
   git_q push --force origin app-7
-  printf 'top\nmid\nbottom\nfrom app-7\n' > shared.txt
-  git add shared.txt && git_q commit -m "app-7 edits shared.txt"
+  printf 'top\nmid\nbottom\nfrom app-7\n' > "$ovf"
+  git add "$ovf" && git_q commit -m "app-7 edits shared file"
   git_q push --force origin app-7
   HEAD_SHA=$(git rev-parse HEAD)
   git_q checkout main
-  printf 'from main\ntop\nmid\nbottom\n' > shared.txt
-  git add shared.txt && git_q commit -m "main edits shared.txt"
+  printf 'from main\ntop\nmid\nbottom\n' > "$ovf"
+  git add "$ovf" && git_q commit -m "main edits shared file"
   git_q push origin main
   git_q checkout app-7
   git_q branch -f main "$HEAD_SHA"
@@ -399,6 +400,46 @@ test_clean_pr_whose_base_moved_on_a_shared_file_rebases_and_asks_for_rereview() 
   git merge-base --is-ancestor origin/main HEAD || fail "HEAD is not on top of origin/main"
   assert_contains "$(fake_stdin)" "main also changed shared.txt"
   assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+# main renames the file the PR edits: a rename-collapsing diff would list no overlap.
+test_base_renaming_a_file_the_pr_edited_is_not_merged_unchecked() {
+  overlap_world
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
+  git_q checkout -B main origin/main
+  git mv shared.txt moved.txt && git_q commit -m "main renames shared.txt"
+  git_q push origin main
+  git_q checkout app-7
+  git_q branch -f main "$HEAD_SHA"
+  pr OPEN false MERGEABLE CLEAN
+  echo "PASS: pushed" | fixture gantry-gate-evidence --force-with-lease
+  ship_status
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+  assert_contains "$(fake_stdin)" "main also changed"
+}
+
+# A second overlap names the files instead of claiming a conflict.
+test_second_overlap_stop_names_the_files_and_does_not_claim_a_conflict() {
+  overlap_world
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
+  rebased='{"event":"commented","author_association":"OWNER","body":"<!-- factory:{\"kind\":\"rebase\",\"pr\":9} -->","created_at":"2026-11-02T00:00:00Z"}'
+  timeline "[$READIED,$rebased]"
+  pr OPEN false MERGEABLE CLEAN
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_eq "STOPPED: PR #9 and main both changed shared.txt, again after one rebase" "$(last_line)" "result"
+}
+
+test_overlap_file_names_are_defused_in_the_comment_and_the_rereview_line() {
+  overlap_world '@someone.txt'
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
+  pr OPEN false MERGEABLE CLEAN
+  echo "PASS: pushed" | fixture gantry-gate-evidence --force-with-lease
+  ship_status
+  assert_eq 3 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_contains "$(last_line)" "&#64;someone.txt"
+  assert_contains "$(fake_stdin)" "&#64;someone.txt"
+  case "$(last_line)$(fake_stdin)" in *@someone*) fail "a raw @name reached the comment or the REREVIEW line" ;; esac
 }
 
 test_clean_pr_whose_base_moved_on_other_files_still_merges() {

@@ -33,4 +33,4 @@ UAT is the set of live checks only Shin can do after a milestone merges.
 
 ## Open
 
-- Nothing advances the release path by itself between milestones; a person (or the milestone skill) edits the CLAUDE.md line. #71 covers a related fail-open: a set key that points at a missing issue starts the whole backlog.
+- Nothing advances the release path by itself between milestones; a person (or the milestone skill) edits the CLAUDE.md line. A set key that cannot be resolved (missing or unreadable issue) starts nothing and says so (#71).

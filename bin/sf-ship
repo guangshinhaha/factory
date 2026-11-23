@@ -255,14 +255,18 @@ wait_mergeable() {
 base_overlap() {
   git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
   fork=$(git merge-base "$start_head" "origin/$base") || retry "merge base of $start_head and origin/$base not read (git merge-base failed)"
-  git diff --name-only "$fork" "$start_head" | sort > "$tmp/ours" || retry "files of $start_head not listed (git diff failed)"
-  git diff --name-only "$fork" "origin/$base" | sort > "$tmp/theirs" || retry "files of origin/$base not listed (git diff failed)"
+  git diff --no-renames --name-only "$fork" "$start_head" | sort > "$tmp/ours" || retry "files of $start_head not listed (git diff failed)"
+  git diff --no-renames --name-only "$fork" "origin/$base" | sort > "$tmp/theirs" || retry "files of origin/$base not listed (git diff failed)"
   comm -12 "$tmp/ours" "$tmp/theirs" | tr '\n' ' ' | sed 's/ $//'
 }
 
+# rebase_once [overlap files]: the files are untrusted names, so they are defused before they reach a comment or a stdout line.
 rebase_once() {
+  shared=
+  [ -z "${1:-}" ] || shared=$(defuse "$1")
   marks=$(markers_since_ready "$repo" "$issue") || retry "timeline of #$issue not read (gh api failed)"
   if printf '%s\n' "$marks" | jq -e 'any(.[]; .kind == "rebase")' > /dev/null; then
+    [ -z "$shared" ] || stop "PR #$pr and $base both changed $shared, again after one rebase"
     stop "PR #$pr conflicts with $base again after one rebase"
   fi
   git fetch -q origin "$base" 2> "$tmp/fetch" || retry "origin/$base not fetched: $(tr '\n' ' ' < "$tmp/fetch")"
@@ -274,7 +278,7 @@ rebase_once() {
   fi
   new_head=$(git rev-parse HEAD)
   note=
-  [ -z "${1:-}" ] || note="; $base also changed $1"
+  [ -z "$shared" ] || note="; $base also changed $shared"
   status=0
   # shellcheck disable=SC2086 # $bug is empty or one flag
   gantry-gate-evidence $bug --force-with-lease > "$tmp/gate" 2>&1 || status=$?
