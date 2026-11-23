@@ -26,13 +26,13 @@ same_answers() {
     titles=$(printf '%s\n' "$FX" | jq -r '.result.tasks[]? | (.task_title? // .display_name? // empty) | tostring')
     for id in $ids nope; do
       for f in status result; do
-        [ "$(tfield "$id" $f; echo x)" = "$(tfield_jq "$id" $f; echo x)" ] || { echo "$1: tfield $id $f differs"; exit 1; }
+        [ "$(tfield "$id" $f; echo x)" = "$(tfield_jq "$id" $f | tr -d "\r"; echo x)" ] || { echo "$1: tfield $id $f differs"; exit 1; }
       done
-      [ "$(title_of "$id"; echo x)" = "$(title_of_jq "$id"; echo x)" ] || { echo "$1: title_of $id differs"; exit 1; }
+      [ "$(title_of "$id"; echo x)" = "$(title_of_jq "$id" | tr -d "\r"; echo x)" ] || { echo "$1: title_of $id differs"; exit 1; }
     done
     for t in $titles nope; do
       for p in "" $ids nope; do
-        [ "$(find_task "$t" "$p"; echo x)" = "$(find_task_jq "$t" "$p"; echo x)" ] || { echo "$1: find_task $t $p differs"; exit 1; }
+        [ "$(find_task "$t" "$p"; echo x)" = "$(find_task_jq "$t" "$p" | tr -d "\r"; echo x)" ] || { echo "$1: find_task $t $p differs"; exit 1; }
       done
     done
   )
