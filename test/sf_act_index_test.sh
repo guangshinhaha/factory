@@ -46,7 +46,7 @@ test_the_index_answers_what_jq_answers() {
 test_a_list_with_shell_metacharacters_is_answered_the_same_and_runs_nothing() {
   list='{"ok":true,"result":{"tasks":[{"id":"$(touch${IFS}PWNED)","status":"`id`","task_title":"*","deps":"[\"*\"]","result":"$HOME \\ \" '"'"'x\n\n"},{"id":"g","task_title":"*","deps":"[\"$(touch${IFS}PWNED)\",\"a*\"]"},{"id":"it'"'"'s","task_title":"q'"'"'r","deps":"[]"}]}}'
   out=$(cd "$TEST_TMP" && same_answers meta "$list" 1 2>&1) || fail "$out"
-  [ ! -e "$TEST_TMP/PWNED" ] && [ ! -e PWNED ] || fail "a task id ran as a command"
+  if [ -e "$TEST_TMP/PWNED" ] || [ -e PWNED ]; then fail "a task id ran as a command"; fi
 }
 
 test_shapes_the_index_cannot_hold_fall_back_to_jq_with_the_same_answers() {
