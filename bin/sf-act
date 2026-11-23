@@ -638,13 +638,15 @@ review_tasks() {
 
 step_route() {
   if ! ij=$(need_result "$(find_task intake)" intake); then give_up "$2" route "$ij"; return 1; fi
-  case "$(rget "$ij" .tier):$(rget "$ij" .work_type)" in
+  rt_tier=$(rget "$ij" .tier)
+  rt_work=$(rget "$ij" .work_type)
+  case "$rt_tier:$rt_work" in
     none:* | low:* | medium:* | high:*) ;;
-    *) give_up "$2" route "intake go has tier [$(rget "$ij" .tier)], not none, low, medium or high"; return 1 ;;
+    *) give_up "$2" route "intake go has tier [$rt_tier], not none, low, medium or high"; return 1 ;;
   esac
-  case "$(rget "$ij" .work_type)" in
+  case "$rt_work" in
     feature | bug-fix | refactoring) ;;
-    *) give_up "$2" route "intake go has work_type [$(rget "$ij" .work_type)], not feature, bug-fix or refactoring"; return 1 ;;
+    *) give_up "$2" route "intake go has work_type [$rt_work], not feature, bug-fix or refactoring"; return 1 ;;
   esac
   if [ "$(rget "$ij" .plan_first)" = true ]; then
     : > "$tmp/brief"
