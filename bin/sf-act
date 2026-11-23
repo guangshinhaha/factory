@@ -1096,10 +1096,12 @@ pass=0
 while [ $pass -lt 4 ]; do
   pass=$((pass + 1))
   sf-state "$repo" > "$tmp/actions" || { trace "sf-state failed"; log "sf-state failed; nothing done this pass"; exit 1; }
-  todo=$(jq -c '[.[] | select(.action != "hold")]' "$tmp/actions") || exit 1
+  # One jq prints the todo array (first line), then one line per action to do.
+  jq -c '[.[] | select(.action != "hold")], (.[] | select(.action != "hold"))' "$tmp/actions" > "$tmp/todo" || exit 1
+  exec 3< "$tmp/todo"
+  IFS= read -r todo <&3 || todo=''
   if [ "$todo" = '[]' ] || [ "$todo" = "$prev" ]; then break; fi
   prev=$todo
-  printf '%s\n' "$todo" | jq -c '.[]' > "$tmp/todo"
   while IFS= read -r a <&3; do
     # One jq reads every field the action may use; @sh quotes each value for eval.
     a_issue='' a_action='' a_run='' a_task='' a_pr='' a_dispatch='' a_worktree='' a_reason='' a_agent_failed=''
@@ -1121,7 +1123,8 @@ while [ $pass -lt 4 ]; do
       *) log "unknown action: $a"; arc=1 ;;
     esac
     [ $arc -eq 0 ] || { trace "action failed: $a"; log "action failed: $a"; exit_status=1; }
-  done 3< "$tmp/todo"
+  done
+  exec 3<&-
 done
 [ "$exit_status" -ne 0 ] || rm -f "$(act_log "$repo")"
 exit "$exit_status"
