@@ -83,14 +83,23 @@ stop() {
   exit 1
 }
 
+cr=$(printf '\r')
+
 # pr_view: read the PR into $tmp/pr.json and set state, cross, head, branch, base, draft, mergeable, merge_state.
 pr_view() {
   gh pr view "$pr" -R "$repo" --json state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit > "$tmp/pr.json" \
     || retry "PR #$pr not read (gh pr view failed)"
   state='' cross='' head='' branch='' base='' draft='' mergeable='' merge_state='' merge_sha=''
-  jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
-  jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
-  eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+  # One jq checks and reads a PR that is exactly one document with a state and a boolean isCrossRepository;
+  # any other shape (none, several, unparseable, a field missing) takes the slow path below, which names it.
+  pr_fast=$(jq -rs 'if length == 1 and (.[0] | type == "object" and has("state") and (.isCrossRepository | type == "boolean")) then .[0] | @sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")" else empty end' "$tmp/pr.json" 2> /dev/null) || pr_fast=''
+  if [ -n "$pr_fast" ]; then
+    eval "${pr_fast%"$cr"}"
+  else
+    jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
+    jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
+    eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+  fi
   # Every read, behind sf-state: a fork PR is never the factory's, even one named like its branch.
   [ "$cross" = false ] || stop "PR #$pr is from a fork; the factory never ships cross-repository PRs"
 }
