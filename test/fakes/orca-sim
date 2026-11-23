@@ -29,6 +29,23 @@ upd() {
   shift
   jq "$@" "$f" "$st" > "$st.new" && mv "$st.new" "$st"
 }
+# mut <jq filter> [jq args...]: one jq builds the new state and the reply, so a guard, the rewrite and the
+# reply cost one process. The filter emits the new state, then the reply; emitting nothing is a failed
+# guard (return 1, state untouched). The reply is printed. Both come back as lines (CR stripped: jq on
+# Windows ends lines with CRLF), split in the shell.
+nl='
+'
+mut() {
+  cr=$(printf '\r')
+  f=$1
+  shift
+  mo=$(jq -c "$@" "$f" "$st") || return 1
+  [ -n "$mo" ] || return 1
+  ms=${mo%%"$nl"*}
+  mr=${mo#*"$nl"}
+  printf '%s\n' "${ms%"$cr"}" > "$st.new" && mv "$st.new" "$st"
+  printf '%s\n' "${mr%"$cr"}"
+}
 
 group=$1
 shift
@@ -85,8 +102,7 @@ PROMOTE='def promote: .tasks as $all | .tasks |= map(if .status == "pending" and
 
 case "$cmd" in
   run-create)
-    upd '.n += 1 | .runs += [{id: "run_\(.n)", objective: $o, created_at: (now | todate)}]' --arg o "${flag_objective:-}"
-    jq -c '{ok: true, result: {runId: .runs[-1].id}}' "$st"
+    mut '.n += 1 | .runs += [{id: "run_\(.n)", objective: $o, created_at: (now | todate)}] | ., {ok: true, result: {runId: .runs[-1].id}}' --arg o "${flag_objective:-}"
     ;;
   run-use)
     jq -e --arg r "${flag_id:-}" 'any(.runs[]; .id == $r)' "$st" > /dev/null || die "run not found: ${flag_id:-}"
@@ -106,22 +122,16 @@ case "$cmd" in
   task-create)
     spec=''
     [ "${flag_spec_file:-}" = - ] && spec=$(cat)
-    jq -e --arg r "${flag_run:-}" 'any(.runs[]; .id == $r)' "$st" > /dev/null || die "run not found: ${flag_run:-}"
-    upd "$PROMOTE"'.n += 1 | .tasks += [{id: "task_\(.n)", run: $r, title: $t, display: $d, deps: ($deps | fromjson), status: "pending", result: null, spec: $s}] | promote' \
-      --arg r "${flag_run:-}" --arg t "${flag_task_title:-}" --arg d "${flag_display_name:-}" --arg deps "${flag_deps:-}" --arg s "$spec"
-    jq -c '{ok: true, result: {taskId: .tasks[-1].id}}' "$st"
+    mut "$PROMOTE"'if any(.runs[]; .id == $r) then .n += 1 | .tasks += [{id: "task_\(.n)", run: $r, title: $t, display: $d, deps: ($deps | fromjson), status: "pending", result: null, spec: $s}] | promote | ., {ok: true, result: {taskId: .tasks[-1].id}} else empty end' \
+      --arg r "${flag_run:-}" --arg t "${flag_task_title:-}" --arg d "${flag_display_name:-}" --arg deps "${flag_deps:-}" --arg s "$spec" || die "run not found: ${flag_run:-}"
     ;;
   task-update)
-    jq -e --arg t "${flag_id:-}" 'any(.tasks[]; .id == $t)' "$st" > /dev/null || die "task not found: ${flag_id:-}"
-    upd "$PROMOTE"'.tasks |= map(if .id == $t then .status = $s | (if $res != "" then .result = $res else . end) else . end) | promote' \
-      --arg t "${flag_id:-}" --arg s "${flag_status:-}" --arg res "${flag_result:-}"
-    ok
+    mut "$PROMOTE"'if any(.tasks[]; .id == $t) then .tasks |= map(if .id == $t then .status = $s | (if $res != "" then .result = $res else . end) else . end) | promote | ., {ok: true, result: {}} else empty end' \
+      --arg t "${flag_id:-}" --arg s "${flag_status:-}" --arg res "${flag_result:-}" || die "task not found: ${flag_id:-}"
     ;;
   worker-start)
-    jq -e --arg t "${flag_task:-}" 'any(.tasks[]; .id == $t and .status == "ready")' "$st" > /dev/null || die "task not ready: ${flag_task:-}"
-    upd '.n += 1 | .dispatches += [{id: "ctx_\(.n)", task: $t, agent: $a, model: $m, worktree: $w}] | .tasks |= map(if .id == $t then .status = "dispatched" else . end)' \
-      --arg t "${flag_task:-}" --arg a "${flag_agent:-}" --arg m "${flag_model:-}" --arg w "${flag_worktree:-}"
-    jq -c '{ok: true, result: {dispatchId: .dispatches[-1].id}}' "$st"
+    mut 'if any(.tasks[]; .id == $t and .status == "ready") then .n += 1 | .dispatches += [{id: "ctx_\(.n)", task: $t, agent: $a, model: $m, worktree: $w}] | .tasks |= map(if .id == $t then .status = "dispatched" else . end) | ., {ok: true, result: {dispatchId: .dispatches[-1].id}} else empty end' \
+      --arg t "${flag_task:-}" --arg a "${flag_agent:-}" --arg m "${flag_model:-}" --arg w "${flag_worktree:-}" || die "task not ready: ${flag_task:-}"
     ;;
   worker-stop)
     upd '.dispatches |= map(if .id == $d then .liveness = "exited" | .stopped = true else . end)' --arg d "${flag_dispatch:-}"
