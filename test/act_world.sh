@@ -20,7 +20,7 @@ git_q() { git -c init.defaultBranch=main "$@" > /dev/null 2>&1; }
 # stub <name>: a logging stand-in for a sibling sf-* script. Prints $TEST_TMP/<name>.out and
 # exits with $TEST_TMP/<name>.exit (default 0).
 stub() {
-  cat > "$TEST_TMP/bin/$1" <<STUB
+  cat_stdin > "$TEST_TMP/bin/$1" <<STUB
 #!/bin/sh
 printf '%s\n' "$1 \$*" >> "\$FAKE_LOG"
 FAKE_CLI_LIB=1 . "\$FACTORY_ROOT/test/fakes/fake-cli"
@@ -29,7 +29,6 @@ n=0
 { read -r n; } 2> /dev/null < "\$TEST_TMP/$1.exit" || n=0
 exit "\$n"
 STUB
-  chmod +x "$TEST_TMP/bin/$1"
 }
 
 # act_world_repos <dir>: <dir>/origin.git (bare) and <dir>/app (clone on main, CLAUDE.md pushed); cd into app.
@@ -56,10 +55,10 @@ world() {
   mkdir -p "$FAKE_FIXTURES" "$ORCA_SIM/fail" "$ORCA_SIM/terminal" "$TEST_TMP/bin" "$SHINSTACK_ROOT/playbooks"
   for p in feature bug-fix refactoring opening-a-pr ship plan; do echo "# $p" > "$SHINSTACK_ROOT/playbooks/$p.md"; done
   printf '#!/bin/sh\n. "%s/test/fakes/orca-sim"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
-  chmod +x "$TEST_TMP/bin/orca"
   stub sf-ship
   stub sf-stop
   stub sf-hold
+  chmod +x "$TEST_TMP/bin/orca" "$TEST_TMP/bin/sf-ship" "$TEST_TMP/bin/sf-stop" "$TEST_TMP/bin/sf-hold"
   PATH=$TEST_TMP/bin:$PATH
   export PATH
 
