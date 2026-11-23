@@ -229,17 +229,27 @@ wait_mergeable() {
 
     : > "$tmp/checks.err"
     gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
-    if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
-      # A repo with no CI at all says `no checks reported`: no required check gates it either.
-      if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
-        echo '[]' > "$tmp/checks"
-      else
-        retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+    # One jq reads one document that is an array: the failed and the pending names (the trailing newlines
+    # $(...) would drop are dropped here). Anything else takes the slow path, which names it.
+    ck_fast=$(jq -rs 'if length == 1 and (.[0] | type == "array") then .[0]
+      | @sh "failed=\([.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ") | sub("\n+$"; "")) pending=\([.[] | select(.bucket == "pending") | .name] | join(", ") | sub("\n+$"; ""))"
+      else empty end' "$tmp/checks" 2> /dev/null) || ck_fast=''
+    if [ -n "$ck_fast" ]; then
+      eval "${ck_fast%"$cr"}"
+      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
+    else
+      if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
+        # A repo with no CI at all says `no checks reported`: no required check gates it either.
+        if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
+          echo '[]' > "$tmp/checks"
+        else
+          retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+        fi
       fi
+      failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
+      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
+      pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
     fi
-    failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
-    [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
-    pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
     if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
       pending="${pending:+$pending, }mergeability"
     elif [ "$merge_state" = BLOCKED ] && jq -e 'length == 0' "$tmp/checks" > /dev/null; then
