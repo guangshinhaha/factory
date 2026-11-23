@@ -1024,6 +1024,27 @@ test_a_worktree_list_with_a_non_object_entry_prints_nothing() {
   assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
 }
 
+test_an_issue_without_labels_is_named_as_the_issue_list_not_the_worktrees() {
+  world
+  issues '[{"number":7,"body":""}]'
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "open issues not read: the issue list has an unexpected shape"
+}
+
+test_bad_worktrees_are_named_before_a_bad_issue() {
+  world
+  issues '[{"number":7,"body":""}]'
+  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orca worktree ps --json --limit 1000
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
+}
+
 test_a_worktree_read_that_fails_prints_nothing() {
   world
   fixture_fail orca worktree ps --json --limit 1000

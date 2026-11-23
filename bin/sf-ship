@@ -83,14 +83,23 @@ stop() {
   exit 1
 }
 
+cr=$(printf '\r')
+
 # pr_view: read the PR into $tmp/pr.json and set state, cross, head, branch, base, draft, mergeable, merge_state.
 pr_view() {
   gh pr view "$pr" -R "$repo" --json state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit > "$tmp/pr.json" \
     || retry "PR #$pr not read (gh pr view failed)"
   state='' cross='' head='' branch='' base='' draft='' mergeable='' merge_state='' merge_sha=''
-  jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
-  jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
-  eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+  # One jq checks and reads a PR that is exactly one document with a state and a boolean isCrossRepository;
+  # any other shape (none, several, unparseable, a field missing) takes the slow path below, which names it.
+  pr_fast=$(jq -rs 'if length == 1 and (.[0] | type == "object" and has("state") and (.isCrossRepository | type == "boolean")) then .[0] | @sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")" else empty end' "$tmp/pr.json" 2> /dev/null) || pr_fast=''
+  if [ -n "$pr_fast" ]; then
+    eval "${pr_fast%"$cr"}"
+  else
+    jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
+    jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
+    eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+  fi
   # Every read, behind sf-state: a fork PR is never the factory's, even one named like its branch.
   [ "$cross" = false ] || stop "PR #$pr is from a fork; the factory never ships cross-repository PRs"
 }
@@ -220,17 +229,27 @@ wait_mergeable() {
 
     : > "$tmp/checks.err"
     gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
-    if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
-      # A repo with no CI at all says `no checks reported`: no required check gates it either.
-      if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
-        echo '[]' > "$tmp/checks"
-      else
-        retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+    # One jq reads one document that is an array: the failed and the pending names (the trailing newlines
+    # $(...) would drop are dropped here). Anything else takes the slow path, which names it.
+    ck_fast=$(jq -rs 'if length == 1 and (.[0] | type == "array") then .[0]
+      | @sh "failed=\([.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ") | sub("\n+$"; "")) pending=\([.[] | select(.bucket == "pending") | .name] | join(", ") | sub("\n+$"; ""))"
+      else empty end' "$tmp/checks" 2> /dev/null) || ck_fast=''
+    if [ -n "$ck_fast" ]; then
+      eval "${ck_fast%"$cr"}"
+      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
+    else
+      if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
+        # A repo with no CI at all says `no checks reported`: no required check gates it either.
+        if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
+          echo '[]' > "$tmp/checks"
+        else
+          retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+        fi
       fi
+      failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
+      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
+      pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
     fi
-    failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
-    [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
-    pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
     if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
       pending="${pending:+$pending, }mergeability"
     elif [ "$merge_state" = BLOCKED ] && jq -e 'length == 0' "$tmp/checks" > /dev/null; then
