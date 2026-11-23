@@ -1,5 +1,5 @@
 # shellcheck shell=sh
-# shellcheck disable=SC2034,SC2154,SC2329,SC2016 # sf-act's block is eval'd: its variables and stubs are used there; the fixtures hold literal $ and backticks
+# shellcheck disable=SC2034,SC2154,SC2329,SC2317,SC2016 # sf-act's block is eval'd: its variables and stubs are used there; the fixtures hold literal $ and backticks
 # sf-act's task index: tfield, title_of and find_task answer from a shell index that load writes,
 # and must answer exactly what the jq readers (tfield_jq, title_of_jq, find_task_jq) answer from
 # the same task list, for every id, title and parent, including shapes the index falls back on.

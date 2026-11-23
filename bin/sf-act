@@ -146,7 +146,7 @@ load() {
 # The index defines _tf_lookup (sets _found _st _rs _tt) and _ft_scan (calls _ft_t per task).
 # shellcheck disable=SC1091,SC2154,SC2329 # sourced at run time; its variables and callbacks are set there
 _idx() { _idx_ok=0; [ ! -f "$tmp/idx.sh" ] || . "$tmp/idx.sh"; }
-# shellcheck disable=SC2154,SC2329 # called from the sourced index; _ft_title and _ft_p come from _ft_scan
+# shellcheck disable=SC2154,SC2329,SC2317 # called from the sourced index; _ft_title and _ft_p come from _ft_scan
 _ft_t() {
   [ "$2" = "$_ft_title" ] || return 0
   if [ -z "$_ft_p" ]; then _ftid=$1; return 0; fi
