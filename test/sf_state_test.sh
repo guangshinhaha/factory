@@ -266,6 +266,15 @@ test_starts_oldest_issues_up_to_factory_concurrency() {
   assert_eq '[{"action":"start","issue":4}]' "$(state)" "actions"
 }
 
+test_the_first_valid_concurrency_line_wins() {
+  world
+  printf 'factory-concurrency: x\nfactory-concurrency: 1\nfactory-concurrency: 5\n' > CLAUDE.md
+  issues "[$(ready_issue_json 9),$(ready_issue_json 4)]"
+  readied 9
+  readied 4
+  assert_eq '[{"action":"start","issue":4}]' "$(state)" "actions"
+}
+
 test_concurrency_defaults_to_two_without_the_claude_md_line() {
   world
   printf '# app\n' > CLAUDE.md
@@ -1003,6 +1012,16 @@ test_cleanup_never_touches_a_worktree_the_factory_did_not_make() {
     {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"},
     {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]}]"
   assert_eq '[]' "$(state)" "actions"
+}
+
+test_a_worktree_list_with_a_non_object_entry_prints_nothing() {
+  world
+  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orca worktree ps --json --limit 1000
+  status=0
+  out=$(state 2> "$TEST_TMP/err") || status=$?
+  assert_eq 1 "$status" "exit status"
+  assert_eq '' "$out" "stdout"
+  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
 }
 
 test_a_worktree_read_that_fails_prints_nothing() {
