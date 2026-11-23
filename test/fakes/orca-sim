@@ -121,7 +121,11 @@ case "$cmd" in
     ;;
   task-create)
     spec=''
-    [ "${flag_spec_file:-}" = - ] && spec=$(cat)
+    if [ "${flag_spec_file:-}" = - ]; then
+      # stdin as $(cat) reads it, in-process: lines kept, trailing newlines dropped.
+      while IFS= read -r sl || [ -n "$sl" ]; do spec=$spec$sl$nl; done
+      while [ "${spec%"$nl"}" != "$spec" ]; do spec=${spec%"$nl"}; done
+    fi
     mut "$PROMOTE"'if any(.runs[]; .id == $r) then .n += 1 | .tasks += [{id: "task_\(.n)", run: $r, title: $t, display: $d, deps: ($deps | fromjson), status: "pending", result: null, spec: $s}] | promote | ., {ok: true, result: {taskId: .tasks[-1].id}} else empty end' \
       --arg r "${flag_run:-}" --arg t "${flag_task_title:-}" --arg d "${flag_display_name:-}" --arg deps "${flag_deps:-}" --arg s "$spec" || die "run not found: ${flag_run:-}"
     ;;
