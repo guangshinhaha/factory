@@ -31,8 +31,9 @@ upd() {
 }
 # mut <jq filter> [jq args...]: one jq builds the new state and the reply, so a guard, the rewrite and the
 # reply cost one process. The filter emits the new state, then the reply; emitting nothing is a failed
-# guard (return 1, state untouched). The reply is printed. Both come back as lines (CR stripped: jq on
-# Windows ends lines with CRLF), split in the shell.
+# guard (return 1, state untouched). The reply is printed. The two lines are split with read: a ${%} or
+# ${%%} pattern on the state is quadratic in the shell (bash 3.2), so the state is never pattern-stripped.
+# jq on Windows ends lines with CRLF: the state keeps its CR (jq reads it as whitespace), the reply loses it.
 nl='
 '
 mut() {
@@ -41,9 +42,13 @@ mut() {
   shift
   mo=$(jq -c "$@" "$f" "$st") || return 1
   [ -n "$mo" ] || return 1
-  ms=${mo%%"$nl"*}
-  mr=${mo#*"$nl"}
-  printf '%s\n' "${ms%"$cr"}" > "$st.new" && mv "$st.new" "$st"
+  {
+    IFS= read -r ms
+    IFS= read -r mr
+  } << MUT
+$mo
+MUT
+  printf '%s\n' "$ms" > "$st.new" && mv "$st.new" "$st"
   printf '%s\n' "${mr%"$cr"}"
 }
 
@@ -122,9 +127,18 @@ case "$cmd" in
   task-create)
     spec=''
     if [ "${flag_spec_file:-}" = - ]; then
-      # stdin as $(cat) reads it, in-process: lines kept, trailing newlines dropped.
-      while IFS= read -r sl || [ -n "$sl" ]; do spec=$spec$sl$nl; done
-      while [ "${spec%"$nl"}" != "$spec" ]; do spec=${spec%"$nl"}; done
+      # stdin as $(cat) reads it, in-process: lines kept, trailing newlines dropped. No pattern strip: it is quadratic.
+      sb=
+      ss=
+      while IFS= read -r sl || [ -n "$sl" ]; do
+        if [ -z "$sl" ]; then
+          sb=$sb$nl
+        else
+          spec=$spec${ss:+$nl}$sb$sl
+          sb=
+          ss=1
+        fi
+      done
     fi
     mut "$PROMOTE"'if any(.runs[]; .id == $r) then .n += 1 | .tasks += [{id: "task_\(.n)", run: $r, title: $t, display: $d, deps: ($deps | fromjson), status: "pending", result: null, spec: $s}] | promote | ., {ok: true, result: {taskId: .tasks[-1].id}} else empty end' \
       --arg r "${flag_run:-}" --arg t "${flag_task_title:-}" --arg d "${flag_display_name:-}" --arg deps "${flag_deps:-}" --arg s "$spec" || die "run not found: ${flag_run:-}"
