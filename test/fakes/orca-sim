@@ -139,10 +139,10 @@ case "$cmd" in
     ;;
   worker-show)
     # A dispatch is exited unless a test set its liveness (sim_set); no such dispatch fails.
-    jq -e --arg d "${flag_dispatch:-}" 'any(.dispatches[]; .id == $d)' "$st" > /dev/null \
-      || die "dispatch_not_found: Worker Dispatch ${flag_dispatch:-} was not found."
-    jq -c --arg d "${flag_dispatch:-}" '.dispatches[] | select(.id == $d)
-      | {ok: true, result: {dispatchId: .id, liveness: (.liveness // "exited")}}' "$st"
+    wo=$(jq -c --arg d "${flag_dispatch:-}" '.dispatches[] | select(.id == $d)
+      | {ok: true, result: {dispatchId: .id, liveness: (.liveness // "exited")}}' "$st")
+    [ -n "$wo" ] || die "dispatch_not_found: Worker Dispatch ${flag_dispatch:-} was not found."
+    printf '%s\n' "${wo%"$(printf '\r')"}"
     ;;
   dispatch-show)
     jq -c --arg t "${flag_task:-}" '[.dispatches[] | select(.task == $t)] | last as $d
@@ -179,10 +179,9 @@ case "$cmd" in
     ;;
   ps)
     # The checkout itself is the main worktree; its terminals (sf-act's own) never count for others.
-    jq -c '{ok: true, result: {worktrees: [.worktrees[] | . as $w | {path, branch: "refs/heads/\(.branch)", repo, isMainWorktree: false,
+    jq -c '. as $st | {ok: true, result: {worktrees: [.worktrees[] | . as $w | {path, branch: "refs/heads/\(.branch)", repo, isMainWorktree: false,
         linkedIssue: .issue, liveTerminalCount: ([$st.terminals[] | select(.worktree == "path:\($w.path)")] | length),
-        agents: [($st.agents // [])[] | select(.worktree == $w.path) | {mainAgent: {state, outcome}}]}], totalCount: (.worktrees | length), truncated: false}}' \
-      --argjson st "$(cat "$st")" "$st"
+        agents: [($st.agents // [])[] | select(.worktree == $w.path) | {mainAgent: {state, outcome}}]}], totalCount: (.worktrees | length), truncated: false}}' "$st"
     ;;
   list)
     jq -c --arg w "${flag_worktree:-}" '{ok: true, result: {terminals: [.terminals[] | select($w == "" or .worktree == $w) | {handle, title}], totalCount: 0, truncated: false}}' "$st"
@@ -194,12 +193,18 @@ case "$cmd" in
   rm)
     p=${flag_worktree:-}
     p=${p#path:}
-    row=$(jq -c --arg p "$p" '.worktrees[] | select(.path == $p)' "$st")
+    # repo_path and branch of the worktree, one per line (CR stripped); neither holds a newline.
+    row=$(jq -r --arg p "$p" '.worktrees[] | select(.path == $p) | .repo_path, .branch' "$st")
     [ -n "$row" ] || die "worktree not found: $p"
-    git -C "$(printf '%s' "$row" | jq -r .repo_path)" worktree remove "$p" > /dev/null 2>&1 || die "worktree $p not removed (uncommitted changes?)"
+    cr=$(printf '\r')
+    wr=${row%%"$nl"*}
+    wr=${wr%"$cr"}
+    wb=${row#*"$nl"}
+    wb=${wb%"$cr"}
+    git -C "$wr" worktree remove "$p" > /dev/null 2>&1 || die "worktree $p not removed (uncommitted changes?)"
     # Like Orca: a branch whose changes are not proven merged is kept (git's safe delete refuses it).
     if [ "${flag_delete_branch:-}" = true ]; then
-      git -C "$(printf '%s' "$row" | jq -r .repo_path)" branch -q -d "$(printf '%s' "$row" | jq -r .branch)" > /dev/null 2>&1 || :
+      git -C "$wr" branch -q -d "$wb" > /dev/null 2>&1 || :
     fi
     upd '.worktrees |= map(select(.path != $p)) | .terminals |= map(select(.worktree != "path:\($p)"))' --arg p "$p"
     ok
