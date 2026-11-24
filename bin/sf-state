@@ -49,6 +49,10 @@ die() {
 
 command -v jq > /dev/null 2>&1 || die "jq not found on PATH"
 
+root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/orch.sh
+. "$root/lib/orch.sh"
+
 repo=${1:-}
 if [ -z "$repo" ]; then
   repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || die "repo not found for the current directory (gh repo view failed)"
@@ -156,10 +160,10 @@ seen_cursors=' '
 tab=$(printf '\t')
 while :; do
   if [ -n "$cursor" ]; then
-    orca orchestration run-list --json --full --limit 100 --cursor "$cursor" > "$tmp/page" \
+    orch_run_list "$cursor" > "$tmp/page" \
       || die "Orca Runs not listed (orca orchestration run-list failed)"
   else
-    orca orchestration run-list --json --full --limit 100 > "$tmp/page" \
+    orch_run_list > "$tmp/page" \
       || die "Orca Runs not listed (orca orchestration run-list failed)"
   fi
   # One pass checks the page whole (one document, an array of runs with string id and objective, a string
@@ -193,7 +197,7 @@ while :; do
   cursor=${cursor%"$cr"}
   while IFS="$tab" read -r id objective created; do
     created=${created%"$cr"}
-    orca orchestration task-list --run "$id" --json > "$tmp/tasks" \
+    orch_task_list "$id" > "$tmp/tasks" \
       || die "tasks of Run $id not listed (orca orchestration task-list failed)"
     # One pass checks the task list whole and prints whether the Run's inbox is wanted (below), then the Run.
     jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" --arg p "factory $repo#" \
@@ -208,7 +212,7 @@ while :; do
     # A dispatched task's worker may have stopped without reporting: Orca says so in the Run inbox.
     # Only a factory Run of this repo is acted on, so only its inbox is read.
     if [ "${want%"$cr"}" = true ]; then
-      orca orchestration inbox --terminal "run:$id" --limit 500 --json --full > "$tmp/inbox" \
+      orch_inbox "$id" > "$tmp/inbox" \
         || die "inbox of Run $id not read (orca orchestration inbox failed)"
       jq -c -s -e --slurpfile run "$tmp/run.json" \
         'select(length == 1) | .[0] | select(.ok == true and (.result.messages | type == "array"))
@@ -232,7 +236,7 @@ while :; do
 done
 
 # Every Orca worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
-orca worktree ps --json --limit 1000 > "$tmp/worktrees.raw" \
+orch_worktree_ps > "$tmp/worktrees.raw" \
   || die "Orca worktrees not listed (orca worktree ps failed)"
 # Timelines: every ready issue, plus every open issue that is neither ready nor parked
 # (needs-shin, icebox) but has a factory Run, since a dead Run there still owes a stop.

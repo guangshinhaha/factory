@@ -18,6 +18,8 @@ me=sf-tick
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/factory.sh
 . "$root/lib/factory.sh"
+# shellcheck source=lib/orch.sh
+. "$root/lib/orch.sh"
 bindir=$root/bin
 
 [ $# -le 1 ] || usage_error "usage: sf-tick [owner/repo]"
@@ -84,7 +86,7 @@ fi
 
 # The terminal's shell has its own PATH; sf-act gets this one (gantry's gates are on it).
 cmd="PATH='$bindir:$PATH' sh '$bindir/sf-act' --repo '$repo' --lock '$lock'; exit"
-if ! orca terminal create --worktree "path:$(pwd)" --title "sf-act $repo" --command "$cmd" --json > /dev/null; then
+if ! orch_terminal_create "$(pwd)" "sf-act $repo" "$cmd" > /dev/null; then
   release
   echo "$me: sf-act not spawned (orca terminal create failed)"
   exit 1
