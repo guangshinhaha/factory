@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Orca-native software factory: turns ready GitHub issues into reviewed, merged PRs. Skills hold judgment; POSIX sh gate scripts hold evidence, merge safety and stop.",
   "author": { "name": "guangshinhaha" },
   "repository": "https://github.com/guangshinhaha/factory",
