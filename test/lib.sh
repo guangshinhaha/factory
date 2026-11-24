@@ -58,15 +58,24 @@ assert_contains() {
   esac
 }
 
+# log_has <line>: the fake log holds exactly that line. Read in-process: a grep per assert is a process per assert.
+log_has() {
+  [ -f "$FAKE_LOG" ] || return 1
+  while IFS= read -r lh_l || [ -n "$lh_l" ]; do
+    [ "$lh_l" != "$1" ] || return 0
+  done < "$FAKE_LOG"
+  return 1
+}
+
 # The exact call line was logged by a fake, e.g. assert_called "gh issue list".
 assert_called() {
-  if ! grep -Fxq -- "$1" "$FAKE_LOG" 2>/dev/null; then
+  if ! log_has "$1"; then
     fail "call not logged: [$1]; calls were: [$(cat "$FAKE_LOG" 2>/dev/null)]"
   fi
 }
 
 assert_not_called() {
-  if grep -Fxq -- "$1" "$FAKE_LOG" 2>/dev/null; then
+  if log_has "$1"; then
     fail "call logged but should not be: [$1]"
   fi
 }
@@ -103,7 +112,12 @@ fixture_seq() {
 
 # count_calls <prefix>: how many logged calls start with <prefix>.
 count_calls() {
-  grep -c -F -- "$1" "$FAKE_LOG" 2> /dev/null || :
+  [ -f "$FAKE_LOG" ] || return 0
+  cc_n=0
+  while IFS= read -r cc_l || [ -n "$cc_l" ]; do
+    case $cc_l in *"$1"*) cc_n=$((cc_n + 1)) ;; esac
+  done < "$FAKE_LOG"
+  echo "$cc_n"
 }
 
 # Everything piped to a fake through "-" (gh --body-file -), in call order.
