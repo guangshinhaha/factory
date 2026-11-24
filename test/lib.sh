@@ -11,6 +11,19 @@
 FAKE_CLI_LIB=1 . "$FACTORY_ROOT/test/fakes/fake-cli"
 unset FAKE_CLI_LIB
 
+# repoint_origin <repo> <url>: set origin's url in <repo>/.git/config in-process (git remote set-url, no git run).
+repoint_origin() {
+  ro_new=
+  while IFS= read -r ro_l || [ -n "$ro_l" ]; do
+    case $ro_l in
+      "	url = "*) ro_l="	url = $2" ;;
+    esac
+    ro_new=$ro_new$ro_l'
+'
+  done < "$1/.git/config"
+  printf '%s' "$ro_new" > "$1/.git/config"
+}
+
 # Point the fakes at test/fixtures/<name>.
 use_fixtures() {
   FAKE_FIXTURES="$FACTORY_ROOT/test/fixtures/$1"

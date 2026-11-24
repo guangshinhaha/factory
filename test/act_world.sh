@@ -63,9 +63,9 @@ world() {
   export PATH
 
   if [ -d "${ACT_WORLD_TEMPLATE:-}/app" ]; then
-    # test/run built the repos once; a copy plus one set-url is cheaper than seven git runs.
+    # test/run built the repos once; a copy plus one config rewrite is cheaper than seven git runs.
     cp -R "$ACT_WORLD_TEMPLATE/origin.git" "$ACT_WORLD_TEMPLATE/app" "$TEST_TMP/"
-    git -C "$TEST_TMP/app" remote set-url origin "$TEST_TMP/origin.git"
+    repoint_origin "$TEST_TMP/app" "$TEST_TMP/origin.git"
     cd "$TEST_TMP/app" || fail "checkout not entered"
   else
     act_world_repos "$TEST_TMP"
