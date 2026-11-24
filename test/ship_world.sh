@@ -33,7 +33,7 @@ ship_world_repos() {
 ship_world_copy() {
   if [ -d "${SHIP_WORLD_TEMPLATE:-}-$1/app" ]; then
     cp -R "$SHIP_WORLD_TEMPLATE-$1/origin.git" "$SHIP_WORLD_TEMPLATE-$1/app" "$2/"
-    git -C "$2/app" remote set-url origin "$2/origin.git"
+    repoint_origin "$2/app" "$2/origin.git"
   else
     ship_world_repos "$1" "$2"
   fi

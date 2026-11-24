@@ -52,7 +52,7 @@ world() {
   GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
   FACTORY_ACT_LOG=$TEST_TMP/act.log
   export FACTORY_ACT_LOG FAKE_FIXTURES ORCA_SIM SHINSTACK_ROOT GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-  mkdir -p "$FAKE_FIXTURES" "$ORCA_SIM/fail" "$ORCA_SIM/terminal" "$TEST_TMP/bin" "$SHINSTACK_ROOT/playbooks"
+  mkdir -p "$FAKE_FIXTURES/gh" "$FAKE_FIXTURES/gantry-gate-evidence" "$ORCA_SIM/fail" "$ORCA_SIM/terminal" "$TEST_TMP/bin" "$SHINSTACK_ROOT/playbooks"
   for p in feature bug-fix refactoring opening-a-pr ship plan; do echo "# $p" > "$SHINSTACK_ROOT/playbooks/$p.md"; done
   printf '#!/bin/sh\n. "%s/test/fakes/orca-sim"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
   stub sf-ship
@@ -63,9 +63,9 @@ world() {
   export PATH
 
   if [ -d "${ACT_WORLD_TEMPLATE:-}/app" ]; then
-    # test/run built the repos once; a copy plus one set-url is cheaper than seven git runs.
+    # test/run built the repos once; a copy plus one config rewrite is cheaper than seven git runs.
     cp -R "$ACT_WORLD_TEMPLATE/origin.git" "$ACT_WORLD_TEMPLATE/app" "$TEST_TMP/"
-    git -C "$TEST_TMP/app" remote set-url origin "$TEST_TMP/origin.git"
+    repoint_origin "$TEST_TMP/app" "$TEST_TMP/origin.git"
     cd "$TEST_TMP/app" || fail "checkout not entered"
   else
     act_world_repos "$TEST_TMP"
@@ -94,13 +94,18 @@ act() {
   act_status=0
   sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" > "$TEST_TMP/out" 2> "$TEST_TMP/err" || act_status=$?
 }
-acts() { act; assert_eq 0 "$act_status" "sf-act exit status (stderr: $(cat "$TEST_TMP/err"))"; }
+acts() {
+  act
+  assert_status0 "$act_status" "sf-act exit status" "$TEST_TMP/err"
+}
 
 sim() { jq -r "$@" "$ORCA_SIM/state.json"; }
 sim_set() {
   f=$1
   shift
-  jq "$@" "$PROMOTE$f | promote" "$ORCA_SIM/state.json" > "$ORCA_SIM/new" && mv "$ORCA_SIM/new" "$ORCA_SIM/state.json"
+  # The state is held in a variable and written back in place: no mv (nothing else writes it while a test edits it).
+  ss_new=$(jq "$@" "$PROMOTE$f | promote" "$ORCA_SIM/state.json") || return 1
+  printf '%s\n' "$ss_new" > "$ORCA_SIM/state.json"
 }
 # status_of <title>: the status of the newest task with that title.
 status_of() { sim --arg t "$1" '[.tasks[] | select(.title == $t)] | last | .status // "none"'; }

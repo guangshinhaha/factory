@@ -11,6 +11,19 @@
 FAKE_CLI_LIB=1 . "$FACTORY_ROOT/test/fakes/fake-cli"
 unset FAKE_CLI_LIB
 
+# repoint_origin <repo> <url>: set origin's url in <repo>/.git/config in-process (git remote set-url, no git run).
+repoint_origin() {
+  ro_new=
+  while IFS= read -r ro_l || [ -n "$ro_l" ]; do
+    case $ro_l in
+      "	url = "*) ro_l="	url = $2" ;;
+    esac
+    ro_new=$ro_new$ro_l'
+'
+  done < "$1/.git/config"
+  printf '%s' "$ro_new" > "$1/.git/config"
+}
+
 # Point the fakes at test/fixtures/<name>.
 use_fixtures() {
   FAKE_FIXTURES="$FACTORY_ROOT/test/fixtures/$1"
@@ -32,6 +45,11 @@ assert_eq() {
   fi
 }
 
+# assert_status0 <status> <what> <errfile>: the status is 0; the failure message carries the file's text, read only on failure.
+assert_status0() {
+  [ "$1" = 0 ] || assert_eq 0 "$1" "$2 ($(cat "$3"))"
+}
+
 assert_contains() {
   # assert_contains <haystack> <needle> [what]
   case "$1" in
@@ -40,15 +58,24 @@ assert_contains() {
   esac
 }
 
+# log_has <line>: the fake log holds exactly that line. Read in-process: a grep per assert is a process per assert.
+log_has() {
+  [ -f "$FAKE_LOG" ] || return 1
+  while IFS= read -r lh_l || [ -n "$lh_l" ]; do
+    [ "$lh_l" != "$1" ] || return 0
+  done < "$FAKE_LOG"
+  return 1
+}
+
 # The exact call line was logged by a fake, e.g. assert_called "gh issue list".
 assert_called() {
-  if ! grep -Fxq -- "$1" "$FAKE_LOG" 2>/dev/null; then
+  if ! log_has "$1"; then
     fail "call not logged: [$1]; calls were: [$(cat "$FAKE_LOG" 2>/dev/null)]"
   fi
 }
 
 assert_not_called() {
-  if grep -Fxq -- "$1" "$FAKE_LOG" 2>/dev/null; then
+  if log_has "$1"; then
     fail "call logged but should not be: [$1]"
   fi
 }
@@ -85,7 +112,12 @@ fixture_seq() {
 
 # count_calls <prefix>: how many logged calls start with <prefix>.
 count_calls() {
-  grep -c -F -- "$1" "$FAKE_LOG" 2> /dev/null || :
+  [ -f "$FAKE_LOG" ] || return 0
+  cc_n=0
+  while IFS= read -r cc_l || [ -n "$cc_l" ]; do
+    case $cc_l in *"$1"*) cc_n=$((cc_n + 1)) ;; esac
+  done < "$FAKE_LOG"
+  echo "$cc_n"
 }
 
 # Everything piped to a fake through "-" (gh --body-file -), in call order.

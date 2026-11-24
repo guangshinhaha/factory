@@ -302,7 +302,7 @@ test_target_repo_hooks_do_not_block_setup() {
   git -C "$TEST_TMP/seed" push -q "$ORIGIN" HEAD:refs/heads/main
   status=0
   sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
   assert_eq "" "$(cat "$TEST_TMP/hooks-ran" 2> /dev/null)" "hooks run"
@@ -321,7 +321,7 @@ test_commit_gpgsign_does_not_block_setup() {
   git -C "$WS" config gpg.program "$TEST_TMP/gpg"
   status=0
   sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "" "$(cat "$TEST_TMP/gpg-ran" 2> /dev/null)" "signer runs"
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
   assert_eq "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
