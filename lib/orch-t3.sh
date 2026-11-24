@@ -74,7 +74,7 @@ t3_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # once. Each record is one trusted comment whose last non-empty line is a well-formed marker of a T3 kind.
 t3_records() {
   if [ -z "${FACTORY_T3_CACHE:-}" ]; then
-    [ -n "${tmp:-}" ] && [ -d "$tmp" ] || { echo "orch-t3: no temp dir for the marker records (tmp unset)" >&2; return 1; }
+    if [ -z "${tmp:-}" ] || [ ! -d "$tmp" ]; then echo "orch-t3: no temp dir for the marker records (tmp unset)" >&2; return 1; fi
     FACTORY_T3_CACHE=$tmp/t3-records.jsonl
     export FACTORY_T3_CACHE
   fi
@@ -329,7 +329,7 @@ orch_worker_send() { t3_worker_request "$1" send "$3" "$4"; }
 # snapshot lacks gets its dispatch request again, so a start lost in a crash converges.
 orch_inbox() {
   t3_records || return 1
-  [ "${FACTORY_T3_THREADS:+x}" = x ] && [ -r "$FACTORY_T3_THREADS" ] || { t3_snapshot_error; return 1; }
+  if [ "${FACTORY_T3_THREADS:+x}" != x ] || [ ! -r "$FACTORY_T3_THREADS" ]; then t3_snapshot_error; return 1; fi
   _ib=$(t3_jq -c --arg r "$1" --arg repo "$repo" --arg now "$(t3_now)" "$T3_DEFS"'fold | . as $s
     | [.tasks[] | select(.run == $r and .status == "dispatched" and .dispatch != null and $s.results[.dispatch] == null)
         | . as $k | {k: $k, th: thread($k.dispatch)}] as $open
@@ -365,7 +365,7 @@ EOF
 # and outcome failure for a failed, interrupted, cancelled or rolled back thread.
 orch_worktree_ps() {
   t3_records || return 1
-  [ "${FACTORY_T3_THREADS:+x}" = x ] && [ -r "$FACTORY_T3_THREADS" ] || { t3_snapshot_error; return 1; }
+  if [ "${FACTORY_T3_THREADS:+x}" != x ] || [ ! -r "$FACTORY_T3_THREADS" ]; then t3_snapshot_error; return 1; fi
   git worktree list --porcelain > "$FACTORY_T3_CACHE.wt" 2> /dev/null || { echo "orch-t3: git worktrees not listed (git worktree list failed)" >&2; return 1; }
   t3_jq -c --rawfile wt "$FACTORY_T3_CACHE.wt" --arg name "${repo#*/}" "$T3_DEFS"'fold | . as $s
     | def issue_of($b): ($b | ltrimstr("debrief-")) as $x

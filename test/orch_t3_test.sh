@@ -1,5 +1,5 @@
 # shellcheck shell=sh
-# shellcheck disable=SC2016 # jq programs in single quotes
+# shellcheck disable=SC2016,SC2119 # jq programs in single quotes; orch_run_list takes an optional run id
 # lib/orch-t3.sh: the T3 orchestrator, called directly (in-process, as sf-state and sf-act source it)
 # and through sf-act fire after fire in the world of test/t3_world.sh.
 
