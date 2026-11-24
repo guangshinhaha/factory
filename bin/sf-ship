@@ -83,7 +83,6 @@ stop() {
   exit 1
 }
 
-cr=$(printf '\r')
 
 # pr_view: read the PR into $tmp/pr.json and set state, cross, head, branch, base, draft, mergeable, merge_state.
 pr_view() {
@@ -98,7 +97,8 @@ pr_view() {
   else
     jq -e 'type == "object" and has("state")' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: gh pr view printed no JSON object"
     jq -e '.isCrossRepository | type == "boolean"' "$tmp/pr.json" > /dev/null 2>&1 || retry "PR #$pr not read: isCrossRepository missing from gh pr view"
-    eval "$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")"
+    pr_slow=$(jq -r '@sh "state=\(.state) cross=\(.isCrossRepository) head=\(.headRefOid) branch=\(.headRefName) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) merge_state=\(.mergeStateStatus) merge_sha=\(.mergeCommit.oid // "")"' "$tmp/pr.json")
+    eval "${pr_slow%"$cr"}"
   fi
   # Every read, behind sf-state: a fork PR is never the factory's, even one named like its branch.
   [ "$cross" = false ] || stop "PR #$pr is from a fork; the factory never ships cross-repository PRs"
@@ -160,6 +160,7 @@ reviewed=$(jq -s --arg head "$head" '
       and ((.body // "") | contains($head)
         and ((test("(^|\n)Covered:") and test("(^|\n)Findings:")) or contains("Codex review not run: "))))' \
   "$tmp/comments" 2> /dev/null) || retry "comments of PR #$pr not read: gh api printed no JSON array"
+reviewed=${reviewed%"$cr"}
 [ "$reviewed" = true ] || stop "no review for PR #$pr head $head: no trusted comment naming the head with Covered: and Findings: lines, or Codex review not run: <reason>"
 
 # --- 4. Mode from the base branch --------------------------------------------------------------
@@ -191,7 +192,8 @@ fi
 # merge_ask: a PR labelled risk:high that waits on a human gets one comment on the issue per head,
 # saying why and how to check it. Best effort: a failed read or post never changes the result.
 merge_ask() {
-  case ",$(jq -r '[.labels[]?.name] | join(",")' "$tmp/ask.json" 2> /dev/null)," in
+  ask_labels=$(jq -r '[.labels[]?.name] | join(",")' "$tmp/ask.json" 2> /dev/null)
+  case ",${ask_labels%"$cr"}," in
     *,risk:high,*) ;;
     *) return 0 ;;
   esac
@@ -247,8 +249,10 @@ wait_mergeable() {
         fi
       fi
       failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
+      failed=${failed%"$cr"}
       [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
       pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
+      pending=${pending%"$cr"}
     fi
     if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
       pending="${pending:+$pending, }mergeability"
@@ -317,6 +321,7 @@ rebase_once() {
       ;;
   esac
   marker=$(jq -cn --argjson pr "$pr" --arg from "$start_head" --arg to "$new_head" '{kind: "rebase", pr: $pr, from: $from, to: $to}')
+  marker=${marker%"$cr"}
   printf 'factory: rebased PR #%s onto %s (%s -> %s)%s; review and verify rerun on the new head.\n\n<!-- factory:%s -->\n' \
     "$pr" "$base" "$start_head" "$new_head" "$note" "$marker" \
     | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
@@ -354,6 +359,7 @@ while :; do
     || retry "ci runs of $start_head not listed (gh run list failed)"
   run=$(jq -r '[.[] | select(.conclusion == "success" or .attempt > 1)] | first // empty | "\(.databaseId) \(.attempt) \(.status)"' "$tmp/runs") \
     || retry "ci runs of $start_head not listed: gh run list printed no JSON array"
+  run=${run%"$cr"}
   [ -n "$run" ] || stop "merge refused: $refusal"
   # shellcheck disable=SC2086 # three words: id, attempt, status
   set -- $run
