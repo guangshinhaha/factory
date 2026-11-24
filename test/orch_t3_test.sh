@@ -140,7 +140,7 @@ test_a_repeated_start_keeps_one_dispatch_and_a_lost_start_is_requested_again() {
     "$(printf '%s' "$req" | jq -c '.dispatch | {id, title, issue, station, agent, model}')" "dispatch request"
   # The path's drive form differs on Windows (C:/... vs /tmp/...): compare its last component.
   assert_eq app "$(printf '%s' "$req" | jq -r '.dispatch.worktree' | sed 's,.*/,,')" "dispatch request worktree"
-  assert_eq "factory-role: intake${nl}see --> here" "$(printf '%s' "$req" | jq -r .dispatch.brief)" "brief"
+  assert_eq "factory-role: intake${nl}see --> here" "$(printf '%s' "$req" | jq -r .dispatch.brief | tr -d '\r')" "brief"
   # The same start again (a crashed fire's retry), in this fire and the next: same dispatch, no new marker.
   assert_eq "$d" "$(orch_worker_start "$it" claude sonnet "path:$TEST_TMP/app" "$run" | jq -r '.result.dispatchId')" "repeat in the fire"
   assert_eq 1 "$(requests_of dispatch | wc -l | tr -d ' ')" "request lines in the fire"
