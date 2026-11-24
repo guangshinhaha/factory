@@ -72,7 +72,7 @@ test_auto_mode_readies_waits_and_merges_at_the_checked_head() {
   pr_seq 2 OPEN false MERGEABLE CLEAN
   pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "MERGED abc123" "$(last_line)" "result"
   assert_called "gantry-gate-evidence"
   assert_called "gantry-verdict-check --pr 9 --repo $REPO --no-label"
@@ -96,7 +96,7 @@ test_already_merged_pr_exits_0_without_gates_or_merge() {
 test_supervised_mode_readies_the_pr_and_never_merges() {
   world supervised
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq PARKED "$(last_line)" "result"
   assert_called "gantry-verdict-check --pr 9 --repo $REPO --no-label"
   assert_called "gh pr ready 9 -R $REPO"
@@ -233,7 +233,7 @@ test_pending_checks_wait_then_merge() {
   printf '[{"name":"gantry / ci-ok","bucket":"pending"}]\n' | fixture_seq 1 gh pr checks 9 -R "$REPO" --required --json name,bucket
   printf '[{"name":"gantry / ci-ok","bucket":"pass"}]\n' | fixture_seq 3 gh pr checks 9 -R "$REPO" --required --json name,bucket
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "MERGED abc123" "$(last_line)" "result"
   assert_eq 3 "$(count_calls "gh pr checks 9")" "check reads"
   assert_contains "$(cat "$TEST_TMP/err")" "waiting on gantry / ci-ok"
@@ -248,7 +248,7 @@ test_checks_not_reported_yet_count_as_pending() {
   fixture_exit 1 "no required checks reported on the 'app-7' branch"
   printf '[{"name":"gantry / ci-ok","bucket":"pass"}]\n' | fixture_seq 2 gh pr checks 9 -R "$REPO" --required --json name,bucket
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_contains "$(cat "$TEST_TMP/err")" "waiting on required checks not reported yet"
   assert_eq 1 "$(count_calls "gh pr merge 9")" "merge attempts"
 }
@@ -328,7 +328,7 @@ test_bug_issue_runs_the_test_first_gate() {
   pr_seq 1 OPEN false MERGEABLE CLEAN
   pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_called "gantry-gate-evidence --bug"
 }
 
@@ -448,7 +448,7 @@ test_clean_pr_whose_base_moved_on_other_files_still_merges() {
   pr_seq 1 OPEN false MERGEABLE CLEAN
   pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "MERGED abc123" "$(last_line)" "result"
   assert_eq 0 "$(count_calls "--force-with-lease")" "pushes"
 }
@@ -519,7 +519,7 @@ test_refused_merge_reruns_green_ci_once_then_merges() {
   ci_runs '[{"databaseId":5000,"attempt":1,"status":"completed","conclusion":"skipped"},{"databaseId":4242,"attempt":1,"status":"completed","conclusion":"success"}]'
   fixture gh run rerun 4242 -R "$REPO" < /dev/null
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "MERGED abc123" "$(last_line)" "result"
   assert_called "gh run rerun 4242 -R $REPO"
 }
@@ -644,7 +644,7 @@ test_a_repo_with_no_checks_at_all_merges() {
   fixture_exit 1 "no checks reported on the 'app-7' branch"
   fixture gh pr merge 9 -R "$REPO" --squash --match-head-commit "$HEAD_SHA" < /dev/null
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq "MERGED abc123" "$(last_line)" "result"
 }
 
@@ -657,7 +657,7 @@ test_consult_label_parks_and_never_merges_until_a_person_removes_it() {
   world auto
   issue_labels ready,consult-shin
   ship_status
-  assert_eq 0 "$status" "exit status ($(cat "$TEST_TMP/err"))"
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
   assert_eq PARKED "$(last_line)" "result"
   assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
   assert_eq 0 "$(count_calls "gh issue edit")" "stops (needs-shin) while parked"

@@ -32,6 +32,11 @@ assert_eq() {
   fi
 }
 
+# assert_status0 <status> <what> <errfile>: the status is 0; the failure message carries the file's text, read only on failure.
+assert_status0() {
+  [ "$1" = 0 ] || assert_eq 0 "$1" "$2 ($(cat "$3"))"
+}
+
 assert_contains() {
   # assert_contains <haystack> <needle> [what]
   case "$1" in

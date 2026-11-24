@@ -94,7 +94,10 @@ act() {
   act_status=0
   sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" > "$TEST_TMP/out" 2> "$TEST_TMP/err" || act_status=$?
 }
-acts() { act; assert_eq 0 "$act_status" "sf-act exit status (stderr: $(cat "$TEST_TMP/err"))"; }
+acts() {
+  act
+  assert_status0 "$act_status" "sf-act exit status" "$TEST_TMP/err"
+}
 
 sim() { jq -r "$@" "$ORCA_SIM/state.json"; }
 sim_set() {
