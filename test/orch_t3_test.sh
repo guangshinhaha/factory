@@ -136,8 +136,10 @@ test_a_repeated_start_keeps_one_dispatch_and_a_lost_start_is_requested_again() {
   d=$(orch_worker_start "$it" claude sonnet "path:$TEST_TMP/app" "$run" | jq -r '.result.dispatchId')
   n=$(comments_count)
   req=$(requests_of dispatch)
-  assert_eq "{\"id\":\"$d\",\"title\":\"acme/app#7 intake [$d]\",\"issue\":7,\"station\":\"intake\",\"agent\":\"claude\",\"model\":\"sonnet\",\"worktree\":\"$TEST_TMP/app\"}" \
-    "$(printf '%s' "$req" | jq -c '.dispatch | {id, title, issue, station, agent, model, worktree}')" "dispatch request"
+  assert_eq "{\"id\":\"$d\",\"title\":\"acme/app#7 intake [$d]\",\"issue\":7,\"station\":\"intake\",\"agent\":\"claude\",\"model\":\"sonnet\"}" \
+    "$(printf '%s' "$req" | jq -c '.dispatch | {id, title, issue, station, agent, model}')" "dispatch request"
+  # The path's drive form differs on Windows (C:/... vs /tmp/...): compare its last component.
+  assert_eq app "$(printf '%s' "$req" | jq -r '.dispatch.worktree' | sed 's,.*/,,')" "dispatch request worktree"
   assert_eq "factory-role: intake${nl}see --> here" "$(printf '%s' "$req" | jq -r .dispatch.brief)" "brief"
   # The same start again (a crashed fire's retry), in this fire and the next: same dispatch, no new marker.
   assert_eq "$d" "$(orch_worker_start "$it" claude sonnet "path:$TEST_TMP/app" "$run" | jq -r '.result.dispatchId')" "repeat in the fire"
