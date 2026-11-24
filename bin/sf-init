@@ -189,7 +189,7 @@ else
   gh pr list -R "$repo" --head "$branch" --state open --json url,isCrossRepository > "$tmp/prs" \
     || die "open PRs from $branch not read (gh pr list failed)"
   # A fork's PR can come from a branch with the same name; it is not the setup PR.
-  pr=$(jq -nr 'input |
+  pr=$(jq_lf -nr 'input |
     if type == "array" and all(.[]; (.url | type == "string") and (.isCrossRepository | type == "boolean"))
     then [.[] | select(.isCrossRepository == false)][0].url // "" else error("no PR array") end' "$tmp/prs" 2> /dev/null) \
     || die "open PRs from $branch not read (gh pr list printed no array of PRs with url and isCrossRepository)"
@@ -239,6 +239,7 @@ found=$(jq -r --arg n "$auto" '
   .result | if type == "object" and (.automations | type) == "array" then .automations else error("no automations") end
   | any(.[]; .name == $n)' "$tmp/autos" 2> /dev/null) \
   || die "Orca automations list unreadable (no .result.automations array)"
+found=${found%"$cr"}
 if [ "$found" = true ]; then
   echo "$me: automation $auto exists"
 else
