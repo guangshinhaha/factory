@@ -50,6 +50,8 @@ me=sf-act
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/factory.sh
 . "$root/lib/factory.sh"
+# shellcheck source=lib/orch.sh
+. "$root/lib/orch.sh"
 # The sibling sf-* scripts are found on PATH (sf-tick puts this bin dir first).
 case ":$PATH:" in
   *":$root/bin:"*) ;;
@@ -101,7 +103,6 @@ for g in gantry-gate-evidence gantry-verdict-check; do
 done
 
 log() { echo "$me: $*" >&2; }
-o() { orca orchestration "$@"; }
 # First line of a file, for messages.
 first() { sed -n '1{s/[[:space:]]*$//;p;}' "$1"; }
 # A JSON string of $1.
@@ -117,7 +118,7 @@ LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many req
 
 # ---- Orca -----------------------------------------------------------------------------------
 
-bind() { o run-use --id "$1" --json > /dev/null 2> "$tmp/err" || { log "Run $1 not bound: $(first "$tmp/err")"; return 1; }; }
+bind() { orch_run_bind "$1" > /dev/null 2> "$tmp/err" || { log "Run $1 not bound: $(first "$tmp/err")"; return 1; }; }
 
 # load <run>: the Run's tasks, in full, into $tmp/tasks.json. The one jq that checks them also
 # writes a shell index file (task id -> status, result, title; title -> ids) that tfield, title_of
@@ -125,7 +126,7 @@ bind() { o run-use --id "$1" --json > /dev/null 2> "$tmp/err" || { log "Run $1 n
 # missing id, a non-string title, deps that aren't whitespace-free strings, a NUL) leaves
 # _idx_ok=0, and the three read the file with jq as before.
 load() {
-  o task-list --run "$1" --json --full > "$tmp/tasks.json" 2> "$tmp/err" || { log "tasks of Run $1 not listed: $(first "$tmp/err")"; return 1; }
+  orch_task_list_full "$1" > "$tmp/tasks.json" 2> "$tmp/err" || { log "tasks of Run $1 not listed: $(first "$tmp/err")"; return 1; }
   : > "$tmp/idx.sh"
   jq -sr '
     def dl: if (.deps | type) == "string" then (.deps | try fromjson catch []) else [] end;
@@ -217,7 +218,7 @@ create() {
     printf '%s\n' "$id"
     return 0
   fi
-  o task-create --run "$1" --task-title "$2" --deps "$3" --spec-file - --json > "$tmp/created" 2> "$tmp/err" \
+  orch_task_create "$1" "$2" "$3" > "$tmp/created" 2> "$tmp/err" \
     || { log "task $2 not created in Run $1: $(first "$tmp/err")"; return 1; }
   id=$(jq -r '.result.taskId // empty' "$tmp/created")
   id=${id%"$cr"}
@@ -226,8 +227,8 @@ create() {
   printf '%s\n' "$id"
 }
 
-done_with() { o task-update --id "$1" --status completed --result "$2" --json > /dev/null 2> "$tmp/err" || { log "task $1 not completed: $(first "$tmp/err")"; return 1; }; }
-failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /dev/null 2> "$tmp/err" || { log "task $1 not marked failed: $(first "$tmp/err")"; return 1; }; }
+done_with() { orch_task_complete "$1" "$2" > /dev/null 2> "$tmp/err" || { log "task $1 not completed: $(first "$tmp/err")"; return 1; }; }
+failed_with() { orch_task_fail "$1" "$2" > /dev/null 2> "$tmp/err" || { log "task $1 not marked failed: $(first "$tmp/err")"; return 1; }; }
 
 # The task's result line JSON (`factory-result: {...}`, the body's last non-empty line), or
 # nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
@@ -327,7 +328,7 @@ prep() {
     if git -C "$main" show-ref --verify -q "refs/heads/$b"; then
       git -C "$main" branch -q -D "$b" || { log "stale local branch $b not deleted"; return 1; }
     fi
-    orca worktree create --name "$b" --repo "path:$main" --base-branch "$def" --branch "$b" --issue "$issue" --no-parent --json > /dev/null 2> "$tmp/err" \
+    orch_worktree_create "$b" "$main" "$def" "$b" "$issue" > /dev/null 2> "$tmp/err" \
       || { log "worktree for $b not created: $(first "$tmp/err")"; return 1; }
     wt=$(branch_wt "$b")
     [ -n "$wt" ] || { log "worktree for branch $b not found after orca worktree create"; return 1; }
@@ -429,11 +430,11 @@ CONSULT
 # failure is retried next fire.
 close_terminals_of() {
   ct_w=$1
-  orca terminal list --worktree "path:$ct_w" --json > "$tmp/terms" 2> "$tmp/err" || { log "terminals of $ct_w not listed: $(first "$tmp/err")"; return 1; }
+  orch_terminal_list "$ct_w" > "$tmp/terms" 2> "$tmp/err" || { log "terminals of $ct_w not listed: $(first "$tmp/err")"; return 1; }
   jq -er '.ok == true and (.result.terminals | type == "array") and all(.result.terminals[]; .handle | type == "string")' "$tmp/terms" > /dev/null 2>&1 || { log "terminals of $ct_w not listed: $(first "$tmp/terms")"; return 1; }
   ct_h=$(jq -r '.result.terminals[].handle' "$tmp/terms" | tr -d '\r')
   for ct_t in $ct_h; do
-    orca terminal close --terminal "$ct_t" --json > /dev/null 2> "$tmp/err" || { log "terminal $ct_t of $ct_w not closed: $(first "$tmp/err")"; return 1; }
+    orch_terminal_close "$ct_t" > /dev/null 2> "$tmp/err" || { log "terminal $ct_t of $ct_w not closed: $(first "$tmp/err")"; return 1; }
   done
 }
 # close_terminals: close every live terminal in the issue's worktrees (build and debrief branch),
@@ -472,16 +473,16 @@ provider_of() {
   echo "${pm%% *}"
 }
 # task_dispatch <task>: print the task's last dispatch (nothing when it has none), live or not.
-task_dispatch() { o dispatch-show --task "$1" --json 2> /dev/null | jq_lf -r '.result.dispatch.id // empty'; }
+task_dispatch() { orch_dispatch_show "$1" 2> /dev/null | jq_lf -r '.result.dispatch.id // empty'; }
 # limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
 limit_seen() {
   ld=$(task_dispatch "$1")
   [ -n "$ld" ] || return 1
-  o worker-read --dispatch "$ld" --source terminal --json 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
+  orch_worker_read "$ld" 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
 }
 # last_output <dispatch>: the end of the worker's terminal on one line, for a stop comment.
 last_output() {
-  o worker-read --dispatch "$1" --source terminal --json 2> /dev/null | tail -c 600 | tr -d '\r' | tr -s '\n\t ' ' ' | sed 's/^ //;s/ $//'
+  orch_worker_read "$1" 2> /dev/null | tail -c 600 | tr -d '\r' | tr -s '\n\t ' ' ' | sed 's/^ //;s/ $//'
 }
 
 # ---- launching workers -------------------------------------------------------------------------
@@ -490,12 +491,12 @@ last_output() {
 # (no dispatch, dispatch_not_found, or liveness exited); print `unknown` when Orca can't say.
 # After an Orca restart a task can be ready again while its old worker session lives on (#7).
 live_worker() {
-  o dispatch-show --task "$1" --json > "$tmp/dispatch" 2> /dev/null || { echo unknown; return 0; }
+  orch_dispatch_show "$1" > "$tmp/dispatch" 2> /dev/null || { echo unknown; return 0; }
   ld=$(jq -r 'if .ok == true then (.result.dispatch.id // "") else "?" end' "$tmp/dispatch" 2> /dev/null) || ld='?'
   ld=${ld%"$cr"}
   [ "$ld" != '?' ] || { echo unknown; return 0; }
   [ -n "$ld" ] || return 1
-  if ! o worker-show --dispatch "$ld" --json > "$tmp/worker" 2>&1; then
+  if ! orch_worker_show "$ld" > "$tmp/worker" 2>&1; then
     grep -q dispatch_not_found "$tmp/worker" && return 1
     echo unknown
     return 0
@@ -617,7 +618,7 @@ start_worker() {
     log "#$issue: $title worker not started: its last worker ($lw) has not exited; next fire retries"
     return 1
   fi
-  if o worker-start --task "$t" --agent "$agent" --model "$model" --worktree "path:$wt" --run "$1" --json > "$tmp/started" 2> "$tmp/err"; then
+  if orch_worker_start "$t" "$agent" "$model" "path:$wt" "$1" > "$tmp/started" 2> "$tmp/err"; then
     log "#$issue: started $title ($agent/$model)"
     case "$st" in build | review | verify) stage "$st" ;; esac
     return 0
@@ -883,7 +884,7 @@ step_lessons() {
 
 act_start() {
   printf 'factory: starting an attempt.\n\n<!-- factory:{"kind":"attempt"} -->\n' | comment || return 1
-  o run-create --objective "factory $repo#$issue" --json > "$tmp/run" 2> "$tmp/err" || { log "Run for #$issue not created: $(first "$tmp/err")"; return 1; }
+  orch_run_create "factory $repo#$issue" > "$tmp/run" 2> "$tmp/err" || { log "Run for #$issue not created: $(first "$tmp/err")"; return 1; }
   run=$(jq -r '.result.runId // empty' "$tmp/run")
   run=${run%"$cr"}
   [ -n "$run" ] || { log "Run for #$issue not created: run-create printed no runId"; return 1; }
@@ -951,9 +952,9 @@ act_restart() {
   # The held worker may still sit at its usage limit: fence it so the restart is the only worker.
   if lw=$(live_worker "$2"); then
     [ "$lw" != unknown ] || { log "held worker of task $2 not checked (Orca didn't answer); next fire retries"; return 1; }
-    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "held worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+    orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "held worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   fi
-  o task-update --id "$2" --status ready --json > /dev/null 2> "$tmp/err" || { log "task $2 not set ready: $(first "$tmp/err")"; return 1; }
+  orch_task_ready "$2" > /dev/null 2> "$tmp/err" || { log "task $2 not set ready: $(first "$tmp/err")"; return 1; }
   act_advance "$1" "$2"
 }
 
@@ -970,9 +971,9 @@ act_nudge() {
   # Marker first: a send that fails after it means the next escalation stops (fail closed), where
   # a marker that fails after the send would nudge again every fire.
   printf 'factory: nudged the %s worker, which stopped without reporting.\n\n<!-- factory:{"kind":"nudge","dispatch":"%s"} -->\n' "$title" "$d" | comment || return 1
-  o send --to "dispatch:$d" --run "$run" --subject "factory: report your result" \
-    --body "You ended your turn without worker_done. Finish the task in the foreground, then send worker_done with the factory-result line. If you can't finish, report status stop with the reason." \
-    --json > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
+  orch_worker_send "$d" "$run" "factory: report your result" \
+    "You ended your turn without worker_done. Finish the task in the foreground, then send worker_done with the factory-result line. If you can't finish, report status stop with the reason." \
+    > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
 }
 
 # act_retry <run> <task>: the task's agent ended with outcome=failure and no report (#57). At a
@@ -992,9 +993,9 @@ act_retry() {
   printf 'factory: the %s agent ended with outcome=failure and no report; running it again once.\n\n<!-- factory:{"kind":"retry","task":"%s"} -->\n' "$title" "$t" | comment || return 1
   if lw=$(live_worker "$t"); then
     [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
-    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+    orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   fi
-  o task-update --id "$t" --status ready --json > /dev/null 2> "$tmp/err" || { log "task $t not set ready: $(first "$tmp/err")"; return 1; }
+  orch_task_ready "$t" > /dev/null 2> "$tmp/err" || { log "task $t not set ready: $(first "$tmp/err")"; return 1; }
   act_advance "$run" "$t"
 }
 
@@ -1009,7 +1010,7 @@ act_abandon() {
   for t in $open; do
     lw=$(live_worker "$t") || continue
     [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
-    o worker-stop --dispatch "$lw" --json > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
+    orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   done
   close_terminals || return 1
   for t in $open; do
@@ -1035,7 +1036,7 @@ act_cleanup() {
     [ -z "$dirty" ] || { log "#$issue: worktree $w has uncommitted changes; not removed"; return 1; }
     close_terminals_of "$w" || return 1
   fi
-  orca worktree rm --worktree "path:$w" --delete-branch --json > /dev/null 2> "$tmp/err" || { log "#$issue: worktree $w not removed: $(first "$tmp/err")"; return 1; }
+  orch_worktree_rm "$w" > /dev/null 2> "$tmp/err" || { log "#$issue: worktree $w not removed: $(first "$tmp/err")"; return 1; }
   log "#$issue: removed worktree $w"
   stage cleanup
 }
@@ -1055,14 +1056,14 @@ act_stop() {
     out=''
     if [ -n "$ld" ]; then
       out=$(last_output "$ld")
-      o worker-stop --dispatch "$ld" --json > /dev/null 2>&1 || log "worker of dispatch $ld not stopped"
+      orch_worker_stop "$ld" > /dev/null 2>&1 || log "worker of dispatch $ld not stopped"
     fi
     give_up "$t" "$st" "$reason. Last output: ${out:-none}. To rerun, label the issue ready again."
     return
   fi
   if [ -n "${4:-}" ]; then
     bind "$run" || return 1
-    o worker-stop --dispatch "$4" --json > /dev/null 2>&1 || log "worker of dispatch $4 not stopped"
+    orch_worker_stop "$4" > /dev/null 2>&1 || log "worker of dispatch $4 not stopped"
     give_up "$t" "$st" "$reason"
     return
   fi

@@ -38,7 +38,7 @@ in_sf_act() {
     mkdir -p "$tmp"
     log() { :; }
     first() { :; }
-    o() { printf '%s\n' "$FX"; }
+    orch_task_list_full() { printf '%s\n' "$FX"; }
     FX=$1
     . "$FACTORY_ROOT/lib/factory.sh"
     eval "$(index_block)"

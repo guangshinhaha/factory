@@ -30,6 +30,8 @@ me=sf-init
 # shellcheck source=lib/factory.sh
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/lib/factory.sh"
+# shellcheck source=lib/orch.sh
+. "$root/lib/orch.sh"
 
 repo=
 ws=
@@ -234,7 +236,7 @@ fi
 
 # 3. The Orca automation.
 auto=factory-$repo
-orca automations list --json > "$tmp/autos" || die "Orca automations not listed (orca automations list failed)"
+orch_automation_list > "$tmp/autos" || die "Orca automations not listed (orca automations list failed)"
 found=$(jq -r --arg n "$auto" '
   .result | if type == "object" and (.automations | type) == "array" then .automations else error("no automations") end
   | any(.[]; .name == $n)' "$tmp/autos" 2> /dev/null) \
@@ -248,8 +250,7 @@ else
   esac
   # Orca runs the precheck with its own PATH: set this one, and call sf-tick by path.
   precheck="PATH='$PATH' sh '$root/bin/sf-tick'"
-  orca automations create --name "$auto" --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck "$precheck" --workspace "path:$ws" --json > /dev/null \
+  orch_automation_create "$auto" '*/5 * * * *' /factory:foreman "$precheck" "$ws" > /dev/null \
     || die "automation $auto missing (orca automations create failed)"
   echo "$me: created automation $auto"
 fi
