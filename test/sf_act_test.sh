@@ -86,11 +86,12 @@ test_post_plan_redone_after_a_crash_posts_the_plan_once() {
 test_a_result_line_wrapped_in_backticks_or_ending_in_a_full_stop_is_still_read() {
   world
   acts
-  finish intake "$GO"
+  finish intake "$PLAN_FIRST"
   acts
   finish plan "$(printf 'the plan\n`factory-result: {"station":"plan","status":"planned"}`.')"
   acts
   assert_eq dispatched "$(status_of build)" "build after a backticked result line"
+  assert_eq 1 "$(grep -c 'kind":"plan' "$FAKE_LOG.stdin")" "plan comments after a backticked result line"
 }
 
 test_a_step_that_dies_midway_is_redone_without_doubling_tasks() {
