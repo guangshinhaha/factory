@@ -34,12 +34,13 @@ GUARD
 # Prints the report and writes the verdict (0 pass, 1 fail) to $results/<id>.status.
 run_unit() {
   uid=$1 path=$2 name=$3 fn=$4
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || {
+  # One mkdir for the unit's dir, its work dir and HOME; the name is unique per unit within this run.
+  tmp=$results/u$uid
+  mkdir -p "$tmp/work/home" || {
     echo "FAIL $name $fn: temp dir not created"
     echo 1 > "$results/$uid.status"
     return 0
   }
-  mkdir "$tmp/work"
   : > "$tmp/calls.log"
   (
     FACTORY_ROOT=$root
@@ -52,7 +53,6 @@ run_unit() {
     # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
     GH_CONFIG_DIR=$tmp/work/gh-config
     HOME=$tmp/work/home
-    mkdir "$HOME"
     unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
     # A git hook (pre-push) exports these; tests that build their own repos must not inherit them.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
