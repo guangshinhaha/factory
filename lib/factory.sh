@@ -13,6 +13,34 @@ usage_error() {
   exit 2
 }
 
+# On Windows git-bash jq ends every output line with CRLF. cr and nl serve the readers below;
+# strip_cr <var> turns CRLF into LF in the variable (and drops one CR left at its end, where
+# $(...) took the LF), with parameter expansion only: no fork. A CR that jq printed before a
+# line end is indistinguishable from its CRLF, so it goes too; a CR elsewhere in a value stays.
+cr=$(printf '\r')
+nl='
+'
+strip_cr() {
+  eval "_sc=\${$1}"
+  while :; do
+    case $_sc in
+      *"$cr$nl"*) _sc=${_sc%%"$cr$nl"*}$nl${_sc#*"$cr$nl"} ;;
+      *) break ;;
+    esac
+  done
+  eval "$1=\${_sc%\"\$cr\"}"
+}
+
+# jq_lf <jq args>: jq with LF line ends, same output and exit status otherwise (one capture,
+# no extra process). Reads the caller's stdin.
+jq_lf() {
+  if _jo=$(jq "$@" && printf x); then _jr=0; else _jr=$?; fi
+  strip_cr _jo
+  if [ "$_jr" = 0 ]; then _jo=${_jo%x}; fi
+  printf '%s' "$_jo"
+  return "$_jr"
+}
+
 need_jq() {
   command -v jq > /dev/null 2>&1 || usage_error "jq not found on PATH"
 }
@@ -94,11 +122,14 @@ ask_body_text() {
       ab_head=$(printf '%s\n' "$ab_json" | jq -r '.headRefOid // empty' 2> /dev/null | tr -cd 'A-Za-z0-9')
       ab_labels=$(printf '%s\n' "$ab_json" | jq -r '[.labels[]?.name] | join(",")' 2> /dev/null | tr -cd 'A-Za-z0-9:_.,-')
       ab_nfiles=$(printf '%s\n' "$ab_json" | jq -r '[.files[]?.path] | length' 2> /dev/null)
+      ab_nfiles=${ab_nfiles%"$cr"}
       # Names are untrusted: sanitised and capped in jq so a newline in a name cannot split the output.
       ab_files=$(printf '%s\n' "$ab_json" | jq -r '[.files[]?.path
           | tostring | gsub("[^A-Za-z0-9._/+=,:~ -]"; "?") | gsub("(?i)factory:"; "factory_") | .[0:60] + (if length > 60 then "..." else "" end) | "`" + . + "`"]
         | if length == 0 then "" else (.[0:8] | join(", ")) + (if length > 8 then ", and \(length - 8) more" else "" end) end' 2> /dev/null)
-      case $(gh pr view "$ab_pr" -R "$ab_repo" --json isCrossRepository 2> /dev/null | jq -r '.isCrossRepository' 2> /dev/null) in
+      ab_files=${ab_files%"$cr"}
+      ab_x=$(gh pr view "$ab_pr" -R "$ab_repo" --json isCrossRepository 2> /dev/null | jq -r '.isCrossRepository' 2> /dev/null)
+      case ${ab_x%"$cr"} in
         false) ab_fork=no ;;
         true) ab_fork=yes ;;
       esac
@@ -113,6 +144,7 @@ ask_body_text() {
         | {at: [.[] | select(.body | contains($h)) | (.body | split("\n") | map(select(test("^(factory |Findings:|Codex review not run)"))) | map(gsub("[^A-Za-z0-9._/+=,:~ -]"; "?") | gsub("(?i)factory:"; "factory_") | .[0:140]) | join(" / ") | "`" + . + "`")],
            n: length}
         | (.at[] | "S:" + .), (if (.at | length) == 0 and .n > 0 then "O:" else empty end)' 2> /dev/null) || ab_all=
+      strip_cr ab_all
       ab_seen=$(printf '%s\n' "$ab_all" | sed -n 's/^S://p')
       ab_other=$(printf '%s\n' "$ab_all" | sed -n '/^O:/p')
     fi

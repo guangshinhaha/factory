@@ -46,6 +46,7 @@ if printf '%s\n' "$marks" | jq -e --arg p "$provider" --arg r "$reset" '
 fi
 
 marker=$(jq -cn --arg p "$provider" --arg r "$reset" '{kind: "hold", provider: $p, reset: $r}')
+marker=${marker%"$cr"}
 printf 'factory: held until %s (%s usage limit).\n\n<!-- factory:%s -->\n' "$reset" "$provider" "$marker" \
   | gh issue comment "$issue" -R "$repo" --body-file - > /dev/null \
   || die "hold comment not posted on #$issue (gh issue comment failed)"

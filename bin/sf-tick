@@ -75,6 +75,7 @@ if ! actions=$(sh "$bindir/sf-state" "$repo"); then
   exit 1
 fi
 n=$(printf '%s\n' "$actions" | jq '[.[] | select(.action != "hold")] | length') || n=
+n=${n%"$cr"}
 if [ "$n" = 0 ] || [ -z "$n" ]; then
   release
   echo "$me: nothing to do for $repo"

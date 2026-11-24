@@ -105,7 +105,10 @@ o() { orca orchestration "$@"; }
 # First line of a file, for messages.
 first() { sed -n '1{s/[[:space:]]*$//;p;}' "$1"; }
 # A JSON string of $1.
-js() { jq -cn --arg s "$1" '$s'; }
+js() {
+  _js=$(jq -cn --arg s "$1" '$s') || return
+  printf '%s\n' "${_js%"$cr"}"
+}
 # The first 400 bytes of stdin, for a result reason.
 clip() { dd bs=400 count=1 2> /dev/null; }
 
@@ -141,6 +144,17 @@ load() {
         else "_idx_ok=0" end
     else error("sf-act:shape") end' "$tmp/tasks.json" > "$tmp/idx.sh" 2> /dev/null \
     || { : > "$tmp/idx.sh"; log "tasks of Run $1 not listed: task-list printed no task array"; return 1; }
+  # jq ends its lines with CRLF on Windows, which the shell would read into the index: one CR off each line.
+  IFS= read -r _l < "$tmp/idx.sh" || :
+  case $_l in
+    *"$cr")
+      if sed "s/$cr\$//" "$tmp/idx.sh" > "$tmp/idx.lf"; then mv "$tmp/idx.lf" "$tmp/idx.sh"; else
+        : > "$tmp/idx.sh"
+        log "tasks of Run $1 not listed: index not read"
+        return 1
+      fi
+      ;;
+  esac
 }
 # _idx: source the index of the last load (empty or missing leaves _idx_ok=0).
 # The index defines _tf_lookup (sets _found _st _rs _tt) and _ft_scan (calls _ft_t per task).
@@ -153,10 +167,13 @@ _ft_t() {
   _ft_pat=" $_ft_p "
   case $3 in *"$_ft_pat"*) _ftid=$1 ;; esac
 }
-tfield_jq() { jq -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
-title_of_jq() { jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | .task_title // .display_name // ""' "$tmp/tasks.json"; }
+# shellcheck disable=SC2016 # jq programs
+tfield_jq() { jq_lf -r --arg t "$1" --arg f "$2" '.result.tasks[] | select(.id == $t) | .[$f] // "" | tostring' "$tmp/tasks.json"; }
+# shellcheck disable=SC2016 # jq program
+title_of_jq() { jq_lf -r --arg t "$1" '.result.tasks[] | select(.id == $t) | .task_title // .display_name // ""' "$tmp/tasks.json"; }
+# shellcheck disable=SC2016 # jq program
 find_task_jq() {
-  jq -r --arg title "$1" --arg p "${2:-}" '[.result.tasks[] | select((.task_title // .display_name) == $title)
+  jq_lf -r --arg title "$1" --arg p "${2:-}" '[.result.tasks[] | select((.task_title // .display_name) == $title)
     | select($p == "" or ((try (.deps | fromjson) catch []) | index($p)))] | last | .id // empty' "$tmp/tasks.json"
 }
 # shellcheck disable=SC2154 # _found _st _rs _tt are set by the sourced index
@@ -203,6 +220,7 @@ create() {
   o task-create --run "$1" --task-title "$2" --deps "$3" --spec-file - --json > "$tmp/created" 2> "$tmp/err" \
     || { log "task $2 not created in Run $1: $(first "$tmp/err")"; return 1; }
   id=$(jq -r '.result.taskId // empty' "$tmp/created")
+  id=${id%"$cr"}
   [ -n "$id" ] || { log "task $2 not created in Run $1: task-create printed no taskId"; return 1; }
   load "$1" || return 1
   printf '%s\n' "$id"
@@ -216,6 +234,7 @@ failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /
 result_json() {
   body=$(jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | (.result // "" | tostring) as $raw
     | (try ($raw | fromjson | .body // empty | tostring | select(. != "")) catch empty) // $raw' "$tmp/tasks.json")
+  strip_cr body
   line=$(printf '%s\n' "$body" | awk 'NF { l = $0 } END { print l }')
   # Workers sometimes end the body's last line with the result instead of giving it its own line
   # (seen in the e2e): the JSON after the line's last `factory-result: ` counts too.
@@ -223,14 +242,15 @@ result_json() {
     *'factory-result: '*) printf '%s\n' "${line##*factory-result: }" | jq -c 'select(type == "object")' 2> /dev/null ;;
   esac
 }
-outcome_of() { tfield "$1" result | jq -Rrs 'try (fromjson | .outcome // empty) catch empty' 2> /dev/null; }
+outcome_of() { tfield "$1" result | jq_lf -Rrs 'try (fromjson | .outcome // empty) catch empty' 2> /dev/null; }
 # The worker body minus its result line (plan's plan).
 body_of() {
   raw=$(tfield "$1" result)
   body=$(printf '%s' "$raw" | jq -Rrs 'try (fromjson | .body // empty) catch empty' 2> /dev/null)
+  strip_cr body
   printf '%s\n' "$body" | grep -v '^factory-result:' | sed 's/[[:space:]]*factory-result: {.*$//'
 }
-rget() { printf '%s\n' "$1" | jq -r "$2 // empty | tostring"; }
+rget() { printf '%s\n' "$1" | jq_lf -r "$2 // empty | tostring"; }
 
 station_of() { printf '%s\n' "${1%% *}"; }
 round_of() { case " $1 " in *" r2 "*) echo 2 ;; *) echo 1 ;; esac; }
@@ -298,6 +318,7 @@ stage() {
   if printf '%s\n' "$sg_marks" | jq -e --arg s "$1" 'any(.[]; .kind == "stage" and .stage == $s)' > /dev/null 2>&1; then return 0; fi
   sg_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { log "#$issue: stage $1 not stamped: no clock"; return 0; }
   sg_m=$(jq -cn --arg s "$1" --arg at "$sg_at" '{kind: "stage", stage: $s, at: $at}') || return 0
+  sg_m=${sg_m%"$cr"}
   printf 'factory: stage %s began at %s.\n\n<!-- factory:%s -->\n' "$1" "$sg_at" "$sg_m" | comment || return 0
 }
 
@@ -320,6 +341,7 @@ post_timeline() {
         .out += ["- \($m.stage): \($m.at)" + (if .prev == null then "" else " (+\([($m.at | epoch) - .prev, 0] | max | dur))" end)]
         | .prev = ($m.at | epoch))
     | .out[]' 2> /dev/null) || { log "#$issue: timeline not posted: stamps not read"; return 0; }
+  strip_cr pt_lines
   [ -n "$pt_lines" ] || return 0
   printf 'factory: run timeline (UTC). "+" is the time since the previous stage began: that stage'"'"'s run plus any wait for the next sf-tick.\n\n%s\n\n<!-- factory:{"kind":"timeline"} -->\n' "$pt_lines" | comment || return 0
 }
@@ -407,14 +429,14 @@ hold_task() {
   failed_with "$1" "factory-result: {\"station\":$(js "$2"),\"status\":\"hold\",\"provider\":$(js "$3"),\"reset\":$(js "$4"),\"reason\":$(js "$5")}" || return 1
   sf-hold --repo "$repo" "$issue" "$3" "$4" >&2
 }
-in_an_hour() { jq -nr 'now + 3600 | floor | todate'; }
+in_an_hour() { jq_lf -nr 'now + 3600 | floor | todate'; }
 # The provider of the station's agent; the table's when the override can't be read.
 provider_of() {
   pm=$(model_for "$1" 2> /dev/null) || pm=$(default_model "$1")
   echo "${pm%% *}"
 }
 # task_dispatch <task>: print the task's last dispatch (nothing when it has none), live or not.
-task_dispatch() { o dispatch-show --task "$1" --json 2> /dev/null | jq -r '.result.dispatch.id // empty'; }
+task_dispatch() { o dispatch-show --task "$1" --json 2> /dev/null | jq_lf -r '.result.dispatch.id // empty'; }
 # limit_seen <task>: the task's last dispatch shows a usage limit in its recent output.
 limit_seen() {
   ld=$(task_dispatch "$1")
@@ -434,6 +456,7 @@ last_output() {
 live_worker() {
   o dispatch-show --task "$1" --json > "$tmp/dispatch" 2> /dev/null || { echo unknown; return 0; }
   ld=$(jq -r 'if .ok == true then (.result.dispatch.id // "") else "?" end' "$tmp/dispatch" 2> /dev/null) || ld='?'
+  ld=${ld%"$cr"}
   [ "$ld" != '?' ] || { echo unknown; return 0; }
   [ -n "$ld" ] || return 1
   if ! o worker-show --dispatch "$ld" --json > "$tmp/worker" 2>&1; then
@@ -441,7 +464,8 @@ live_worker() {
     echo unknown
     return 0
   fi
-  [ "$(jq -r '.result.liveness // "unknown"' "$tmp/worker" 2> /dev/null)" != exited ] || return 1
+  lv=$(jq -r '.result.liveness // "unknown"' "$tmp/worker" 2> /dev/null) || :
+  [ "${lv%"$cr"}" != exited ] || return 1
   printf '%s\n' "$ld"
 }
 
@@ -678,6 +702,7 @@ step_gate() {
   title=$(title_of "$2")
   rd=$(round_of "$title")
   bt=$(jq -r --arg t "$2" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[0] // empty' "$tmp/tasks.json")
+  bt=${bt%"$cr"}
   if ! bj=$(need_result "$bt" build); then give_up "$2" gate "$bj"; return 1; fi
   b=$(branch)
   wt=$(branch_wt "$b")
@@ -821,6 +846,7 @@ act_start() {
   printf 'factory: starting an attempt.\n\n<!-- factory:{"kind":"attempt"} -->\n' | comment || return 1
   o run-create --objective "factory $repo#$issue" --json > "$tmp/run" 2> "$tmp/err" || { log "Run for #$issue not created: $(first "$tmp/err")"; return 1; }
   run=$(jq -r '.result.runId // empty' "$tmp/run")
+  run=${run%"$cr"}
   [ -n "$run" ] || { log "Run for #$issue not created: run-create printed no runId"; return 1; }
   load "$run" || return 1
   brief_for intake > "$tmp/brief" 2> "$tmp/err" || { stop_now "intake brief not rendered: $(first "$tmp/err")" >&2; return 1; }
@@ -870,7 +896,8 @@ act_advance() {
 act_ship() {
   load "$1" || return 1
   [ "$(tfield "$2" status)" = ready ] || return 0
-  if ! vj=$(need_result "$(jq -r --arg t "$2" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[0] // empty' "$tmp/tasks.json")" verify); then
+  vt=$(jq -r --arg t "$2" '.result.tasks[] | select(.id == $t) | (try (.deps | fromjson) catch []) | .[0] // empty' "$tmp/tasks.json")
+  if ! vj=$(need_result "${vt%"$cr"}" verify); then
     bind "$1" && give_up "$2" ship "$vj"
     return 1
   fi
@@ -1027,6 +1054,7 @@ act_stop() {
       provider=$(rget "$rj" .provider)
       reset=$(rget "$rj" .reset)
       deps=$(printf '%s\n' "$rj" | jq -r '.depends_on // [] | map("#\(.)") | join(", ")')
+      deps=${deps%"$cr"}
       if [ -n "$provider" ] && [ -n "$reset" ]; then
         sf-hold --repo "$repo" "$issue" "$provider" "$reset" >&2
       elif [ -n "$deps" ]; then
@@ -1102,13 +1130,17 @@ while [ $pass -lt 4 ]; do
   jq -c '[.[] | select(.action != "hold")], (.[] | select(.action != "hold"))' "$tmp/actions" > "$tmp/todo" || exit 1
   exec 3< "$tmp/todo"
   IFS= read -r todo <&3 || todo=''
+  todo=${todo%"$cr"}
   if [ "$todo" = '[]' ] || [ "$todo" = "$prev" ]; then break; fi
   prev=$todo
   while IFS= read -r a <&3; do
+    a=${a%"$cr"}
     # One jq reads every field the action may use; @sh quotes each value for eval.
     a_issue='' a_action='' a_run='' a_task='' a_pr='' a_dispatch='' a_worktree='' a_reason='' a_agent_failed=''
-    eval "$(printf '%s\n' "$a" | jq -r '[["a_issue", .issue], ["a_action", .action], ["a_run", .run], ["a_task", .task], ["a_pr", .pr], ["a_dispatch", .dispatch], ["a_worktree", .worktree], ["a_reason", .reason], ["a_agent_failed", .agent_failed]]
-      | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh)) | join("\n")' 2> /dev/null)"
+    a_eval=$(printf '%s\n' "$a" | jq -r '[["a_issue", .issue], ["a_action", .action], ["a_run", .run], ["a_task", .task], ["a_pr", .pr], ["a_dispatch", .dispatch], ["a_worktree", .worktree], ["a_reason", .reason], ["a_agent_failed", .agent_failed]]
+      | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh)) | join("\n")' 2> /dev/null) || a_eval=''
+    strip_cr a_eval
+    eval "$a_eval"
     issue=$a_issue
     pr=''
     arc=0

@@ -84,6 +84,7 @@ fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-state.XXXXXX") || die "temp dir not created"
 trap 'rm -rf "$tmp"' EXIT
+cr=$(printf '\r')
 
 # Open issues, once. `--label`/`--search` would go through the search API (shinfactory#175).
 gh issue list -R "$repo" --state open --limit 1000 --json number,labels,body > "$tmp/issues.json" \
@@ -107,6 +108,7 @@ dup=$(jq -rs '
     *) die "open issues not listed: gh issue list printed no single JSON array" ;;
   esac
 }
+dup=${dup%"$cr"}
 [ -z "$dup" ] || die "open issues not listed: issue #$dup is listed twice"
 
 # A release path issue that is not among the open ones is closed (the release is over: no path)
@@ -151,7 +153,6 @@ factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/run-ids"
 cursor=
 seen_cursors=' '
-cr=$(printf '\r')
 tab=$(printf '\t')
 while :; do
   if [ -n "$cursor" ]; then
@@ -168,7 +169,7 @@ while :; do
     if (try (length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))) catch false) | not then error("sf-state:shape")
     else .[0].result as $r
       | if ($r | (.nextCursor == null or (.nextCursor | type == "string"))) | not then error("sf-state:cursor")
-        else (($seen | split("\n") | map(select(. != ""))) + [$r.runs[].id]) as $all
+        else (($seen | split("\n") | map(rtrimstr("\r") | select(. != ""))) + [$r.runs[].id]) as $all
           | if ($all | length) != ($all | unique | length) then error("sf-state:dup")
             else ($r.nextCursor // ""),
               ($r.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv) end
@@ -181,6 +182,7 @@ while :; do
       *sf-state:dup*)
         jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids"
         dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
+        dup=${dup%"$cr"}
         die "Orca Runs not listed: Run id $dup is listed twice"
         ;;
       *) die "Orca Runs not listed: $(snippet "$tmp/page")" ;;
