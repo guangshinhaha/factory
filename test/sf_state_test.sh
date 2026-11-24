@@ -29,7 +29,8 @@ world() {
   printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
   issues '[]'
   runs '[]'
-  prs '[]'
+  # prs would run jq to normalise a list; an empty one is already normal.
+  printf '[]\n' | prs_raw
   worktrees '[]'
 }
 
