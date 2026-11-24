@@ -88,7 +88,7 @@ shinstack=${SHINSTACK_ROOT:-}
 if [ -z "$shinstack" ]; then
   need_jq
   plugins=$HOME/.claude/plugins/installed_plugins.json
-  shinstack=$(jq -r '.plugins["shinstack@shinstack"][0].installPath // empty' "$plugins" 2> /dev/null) || shinstack=
+  shinstack=$(jq_lf -r '.plugins["shinstack@shinstack"][0].installPath // empty' "$plugins" 2> /dev/null) || shinstack=
   [ -n "$shinstack" ] || die "shinstack not found: no shinstack@shinstack installPath in $plugins and SHINSTACK_ROOT is unset"
 fi
 
