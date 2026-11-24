@@ -1126,21 +1126,23 @@ pass=0
 while [ $pass -lt 4 ]; do
   pass=$((pass + 1))
   sf-state "$repo" > "$tmp/actions" || { trace "sf-state failed"; log "sf-state failed; nothing done this pass"; exit 1; }
-  # One jq prints the todo array (first line), then one line per action to do.
-  jq -c '[.[] | select(.action != "hold")], (.[] | select(.action != "hold"))' "$tmp/actions" > "$tmp/todo" || exit 1
+  # One jq prints the todo array (first line), then one line per action to do: the shell assignments of
+  # every field the action may use (@sh quotes each value; a newline in a value becomes '"$nl"'), and
+  # the action itself as a_json, so no jq runs per action.
+  # shellcheck disable=SC2016 # jq program
+  jq -r --arg nlq "'\"\$nl\"'" '[.[] | select(.action != "hold")] as $t | ($t | tojson),
+    ($t[] | . as $a | [["a_issue", .issue], ["a_action", .action], ["a_run", .run], ["a_task", .task], ["a_pr", .pr], ["a_dispatch", .dispatch], ["a_worktree", .worktree], ["a_reason", .reason], ["a_agent_failed", .agent_failed], ["a_json", ($a | tojson)]]
+      | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh | gsub("\n"; $nlq))) | join(" "))' "$tmp/actions" > "$tmp/todo" || exit 1
   exec 3< "$tmp/todo"
   IFS= read -r todo <&3 || todo=''
   todo=${todo%"$cr"}
   if [ "$todo" = '[]' ] || [ "$todo" = "$prev" ]; then break; fi
   prev=$todo
-  while IFS= read -r a <&3; do
-    a=${a%"$cr"}
-    # One jq reads every field the action may use; @sh quotes each value for eval.
-    a_issue='' a_action='' a_run='' a_task='' a_pr='' a_dispatch='' a_worktree='' a_reason='' a_agent_failed=''
-    a_eval=$(printf '%s\n' "$a" | jq -r '[["a_issue", .issue], ["a_action", .action], ["a_run", .run], ["a_task", .task], ["a_pr", .pr], ["a_dispatch", .dispatch], ["a_worktree", .worktree], ["a_reason", .reason], ["a_agent_failed", .agent_failed]]
-      | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh)) | join("\n")' 2> /dev/null) || a_eval=''
-    strip_cr a_eval
+  while IFS= read -r a_eval <&3; do
+    a_issue='' a_action='' a_run='' a_task='' a_pr='' a_dispatch='' a_worktree='' a_reason='' a_agent_failed='' a_json=''
+    a_eval=${a_eval%"$cr"}
     eval "$a_eval"
+    a=$a_json
     issue=$a_issue
     pr=''
     arc=0
