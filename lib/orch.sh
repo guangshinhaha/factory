@@ -1,8 +1,9 @@
 # shellcheck shell=sh
 # The orchestrator adapter: every call the factory makes to its worker host goes through a function
 # here, so the gate scripts name no host CLI. Sourced by sf-state, sf-act, sf-tick and sf-init, never run.
-# The one implementation today calls the `orca` CLI. A second implementation must keep these names,
-# arguments, exit codes and stdout shapes.
+# FACTORY_ORCH picks the implementation: `orca` (the default) calls the `orca` CLI below; `t3`
+# sources lib/orch-t3.sh, which redefines every function for T3 Code (issue #112). Both keep these
+# names, arguments, exit codes and stdout shapes. The sourcing script sets `root` to the plugin dir.
 #
 # Conventions. Each function runs one host command and passes its stdout, stderr and exit status
 # through untouched, so the caller picks the redirections and the error wording. Exit 0 means the host
@@ -10,14 +11,16 @@
 # "Result" means the host's `{"ok":true,"result":{...}}` envelope, where the caller reads `.result`.
 #
 # Runs (one per issue; objective `factory <owner>/<repo>#<n>`):
-#   orch_run_list [cursor]          one page (100) of Runs. Prints {"runs":[{"id":S,"objective":S,...}], "nextCursor"?:S}
+#   orch_run_list [cursor]          one page (100) of Runs. Prints Result {"runs":[{"id":S,"objective":S,"created_at":S,...}], "nextCursor"?:S}
 #                                   (the page shape sf-state checks: one document, `runs` an array, string id/objective).
-#   orch_run_create <objective>     make a Run. Prints Result {"run":{"id":S}} (the id is `.result.run.id`).
+#   orch_run_create <objective>     make a Run. Prints Result {"runId":S} (sf-act reads `.result.runId`).
 #   orch_run_bind <run>             make this caller the Run's coordinator. Binding is exclusive and
 #                                   last-writer-wins, so call it before every mutation. Output unused.
 # Tasks:
-#   orch_task_list <run>            Prints {"tasks":[{"id":S,"title":S,"status":S,"deps":S,...}]}.
-#   orch_task_list_full <run>       The same, with each task's `result` text.
+#   orch_task_list <run>            Prints Result {"tasks":[{"id":S,"title":S,"status":S,...}]}.
+#   orch_task_list_full <run>       Prints Result {"tasks":[{"id":S,"task_title":S,"deps":S,"status":S,"result":S|null}]};
+#                                   deps is a JSON array as text; a worker's result is the JSON text
+#                                   {"provenance":"worker","outcome":S,"body":S}.
 #   orch_task_create <run> <title> <deps>   spec on stdin; deps is the host's dependency list text.
 #                                   Prints Result {"taskId":S}.
 #   orch_task_complete <task> <result>      status completed, with the result text. Output unused.
@@ -33,14 +36,14 @@
 #   orch_worker_read <dispatch>     the worker's terminal text as JSON, newest last.
 #   orch_worker_stop <dispatch>     end the worker. Output unused.
 #   orch_worker_send <dispatch> <run> <subject> <body>   message a live worker. Output unused.
-#   orch_inbox <run>                the Run's mail, up to 500. Prints {"messages":[{"type":S,"subject":S,"body":S,...}]}.
+#   orch_inbox <run>                the Run's mail, up to 500. Prints Result {"messages":[{"type":S,"subject":S,"payload":S,"created_at":S,...}]}.
 # Worktrees:
-#   orch_worktree_ps                every worktree, up to 1000. Prints {"worktrees":[{...}]} (the shape sf-state checks).
+#   orch_worktree_ps                every worktree, up to 1000. Prints Result {"worktrees":[{...}]} (the shape sf-state checks).
 #   orch_worktree_create <name> <main> <base> <branch> <issue>   a worktree of the repo at <main> on a new
 #                                   branch, linked to the issue, with no parent. Output unused.
 #   orch_worktree_rm <worktree>     remove it and its branch. Output unused.
 # Terminals:
-#   orch_terminal_list <worktree>   Prints {"terminals":[{"handle":S,...}]}.
+#   orch_terminal_list <worktree>   Prints Result {"terminals":[{"handle":S,...}]}.
 #   orch_terminal_close <terminal>  Output unused.
 #   orch_terminal_create <worktree> <title> <command>   a terminal running the shell command line.
 #                                   Output unused.
@@ -91,3 +94,15 @@ orch_automation_create() {
   orca automations create --name "$1" --trigger "$2" --provider claude \
     --prompt "$3" --precheck "$4" --workspace "path:$5" --json
 }
+
+case "${FACTORY_ORCH:-orca}" in
+  orca) ;;
+  t3)
+    # shellcheck source=lib/orch-t3.sh disable=SC2154 # root comes from the caller
+    . "$root/lib/orch-t3.sh"
+    ;;
+  *)
+    echo "FACTORY_ORCH [$FACTORY_ORCH] is neither orca nor t3" >&2
+    exit 2
+    ;;
+esac
