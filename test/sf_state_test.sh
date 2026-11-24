@@ -9,8 +9,8 @@ fixture() {
   tool=$1
   shift
   key=$(mkkey "$@")
-  mkdir -p "$FAKE_FIXTURES/$tool"
-  cat > "$FAKE_FIXTURES/$tool/$key.out"
+  [ -d "$FAKE_FIXTURES/$tool" ] || mkdir -p "$FAKE_FIXTURES/$tool"
+  cat_stdin > "$FAKE_FIXTURES/$tool/$key.out"
 }
 
 # fixture_fail <tool> <args...>: the call fails with status 1 and a message.
@@ -24,7 +24,7 @@ fixture_fail() {
 world() {
   FAKE_FIXTURES=$TEST_TMP/fx
   export FAKE_FIXTURES
-  mkdir -p "$FAKE_FIXTURES"
+  mkdir -p "$FAKE_FIXTURES/gh" "$FAKE_FIXTURES/orca"
   cd "$TEST_TMP" || fail "test dir not entered: $TEST_TMP"
   printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
   issues '[]'
