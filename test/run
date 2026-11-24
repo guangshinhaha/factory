@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs test files: every test_* function in each file, each in its own subshell,
-# in parallel across test functions; each result prints as soon as its test finishes.
+# in parallel across test functions; a pool of $jobs workers claims units and prints each result as soon as its test finishes.
 # Usage: test/run [file...]   (default: test/*_test.sh)
 #
 # Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
@@ -31,14 +31,12 @@ GUARD
 }
 
 # run_unit <id> <path> <name> <fn>: one test function in its own temp dir and subshell.
-# Writes the report to $results/<id>.out and the verdict (0 pass, 1 fail) to
-# $results/<id>.status, then creates $results/<id>.done last, so a reader that sees .done sees both.
+# Prints the report and writes the verdict (0 pass, 1 fail) to $results/<id>.status.
 run_unit() {
   uid=$1 path=$2 name=$3 fn=$4
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/factory-test.XXXXXX") || {
-    echo "FAIL $name $fn: temp dir not created" > "$results/$uid.out"
+    echo "FAIL $name $fn: temp dir not created"
     echo 1 > "$results/$uid.status"
-    : > "$results/$uid.done"
     return 0
   }
   mkdir "$tmp/work"
@@ -72,17 +70,16 @@ run_unit() {
     status=1
   fi
   if [ "$status" -eq 0 ]; then
-    echo "ok   $name $fn" > "$results/$uid.out"
+    echo "ok   $name $fn"
     echo 0 > "$results/$uid.status"
   else
     {
       echo "FAIL $name $fn"
       sed 's/^/     /' "$tmp/out"
-    } > "$results/$uid.out"
+    }
     echo 1 > "$results/$uid.status"
   fi
   rm -rf "$tmp"
-  : > "$results/$uid.done"
 }
 
 # Jobs: TEST_JOBS, else the CPU count. Every test function is a unit; at most $jobs run at once.
@@ -168,8 +165,12 @@ fi
 
 passed=0
 failed=0
+units=
+total=0
+nl='
+'
 
-# List units as "<path> <name> <fn>" lines in $results/units. A file that is missing
+# List units as "<path> <name> <fn>" lines in $units. A file that is missing
 # or has no tests fails at once, so it can never pass by running nothing.
 for file in "$@"; do
   if [ ! -f "$file" ]; then
@@ -186,56 +187,52 @@ for file in "$@"; do
     continue
   fi
   for fn in $fns; do
-    echo "$path $name $fn" >> "$results/units"
+    units=$units$path' '$name' '$fn$nl
+    total=$((total + 1))
   done
 done
 
-total=0
-[ -f "$results/units" ] && total=$(wc -l < "$results/units" | tr -d ' ')
-
-# Start units in order while fewer than $jobs run; print each unit's report the moment it
-# finishes (completion order), so a timeout still shows progress.
-next=1
-pending=""
-nap=0.2
-active=0
-printed=0
-while [ "$printed" -lt "$total" ]; do
-  while [ "$next" -le "$total" ] && [ "$active" -lt "$jobs" ]; do
-    read -r path name fn << UNIT
-$(sed -n "${next}p" "$results/units")
-UNIT
-    run_unit "$next" "$path" "$name" "$fn" &
-    pending="$pending $next"
-    active=$((active + 1))
-    next=$((next + 1))
-  done
-  progress=0
-  still=""
-  for i in $pending; do
-    if [ -f "$results/$i.done" ]; then
-      cat "$results/$i.out"
-      s=1
-      read -r s < "$results/$i.status" || s=1
-      if [ "$s" = 0 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
-      printed=$((printed + 1))
-      active=$((active - 1))
-      progress=1
+# A pool of $jobs workers (in-process, so a finished test costs no poll and no sleep). A worker claims the
+# next unit by creating its claim file under noclobber: only one creator wins. It prints the report
+# the moment its test finishes (completion order), so a timeout still shows progress.
+worker() {
+  oldifs=$IFS
+  IFS=$nl
+  set -f
+  # shellcheck disable=SC2086 # split on newlines only, no globbing
+  set -- $units
+  IFS=$oldifs
+  set +f
+  w=0
+  while [ "$w" -lt "$total" ]; do
+    w=$((w + 1))
+    set -C
+    if { echo > "$results/claim.$w"; } 2> /dev/null; then
+      set +C
     else
-      still="$still $i"
+      set +C
+      continue
     fi
+    eval "u=\${$w}"
+    wpath=${u%% *}
+    u=${u#* }
+    run_unit "$w" "$wpath" "${u%% *}" "${u#* }"
   done
-  pending=$still
-  # Every poll that finds nothing costs a sleep process, so the wait grows to 1s while no test
-  # finishes and resets when one does.
-  if [ "$progress" -eq 1 ]; then
-    nap=0.2
-  else
-    sleep "$nap"
-    case "$nap" in 0.2) nap=0.5 ;; 0.5) nap=1 ;; esac
-  fi
+}
+n=0
+while [ "$n" -lt "$jobs" ] && [ "$n" -lt "$total" ]; do
+  n=$((n + 1))
+  worker &
 done
 wait
+
+i=0
+while [ "$i" -lt "$total" ]; do
+  i=$((i + 1))
+  s=1
+  read -r s < "$results/$i.status" || s=1
+  if [ "$s" = 0 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+done
 
 if [ -s "$results/guard/unattributed.log" ]; then
   echo "FAIL guard: a test reached a real CLI with FACTORY_GUARD_LOG unset: $(tr '\n' ';' < "$results/guard/unattributed.log")"
