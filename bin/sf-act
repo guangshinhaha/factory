@@ -233,12 +233,21 @@ failed_with() { o task-update --id "$1" --status failed --result "$2" --json > /
 # nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
 result_json() {
   # One jq: the body's last non-blank line (awk's NF: a line of only spaces and tabs is blank; CRLF read as LF), and the
-  # JSON after its last `factory-result: ` when that is an object.
+  # JSON after its last `factory-result: `. A clean object comes back compact; anything else (text after the JSON, as
+  # in a backticked result line) comes back marked `!` and is read by a second jq as a stream, which keeps the leading object.
   # shellcheck disable=SC2016 # jq program
-  jq -c --arg t "$1" '.result.tasks[] | select(.id == $t) | (.result // "" | tostring) as $raw
+  rj_out=$(jq -r --arg t "$1" '.result.tasks[] | select(.id == $t) | (.result // "" | tostring) as $raw
     | ((try ($raw | fromjson | .body // empty | tostring | select(. != "")) catch empty) // $raw)
     | gsub("\r\n"; "\n") | split("\n") | map(select(test("[^ \t]"))) | (last // "") | rtrimstr("\r")
-    | select(contains("factory-result: ")) | split("factory-result: ") | last | (try fromjson catch empty) | select(type == "object")' "$tmp/tasks.json" || :
+    | select(contains("factory-result: ")) | split("factory-result: ") | last
+    | . as $c | (try ($c | fromjson) catch null) as $j
+    | if ($j | type) == "object" then ($j | tojson) else "!" + $c end' "$tmp/tasks.json") || :
+  rj_out=${rj_out%"$cr"}
+  case "$rj_out" in
+    '') ;;
+    '!'*) printf '%s\n' "${rj_out#!}" | jq -c 'select(type == "object")' 2> /dev/null || : ;;
+    *) printf '%s\n' "$rj_out" ;;
+  esac
 }
 outcome_of() { tfield "$1" result | jq_lf -Rrs 'try (fromjson | .outcome // empty) catch empty' 2> /dev/null; }
 # The worker body minus its result line (plan's plan).
