@@ -250,7 +250,36 @@ body_of() {
   strip_cr body
   printf '%s\n' "$body" | grep -v '^factory-result:' | sed 's/[[:space:]]*factory-result: {.*$//'
 }
-rget() { printf '%s\n' "$1" | jq_lf -r "$2 // empty | tostring"; }
+# rload <json>: read the result fields rget is asked for in one jq, so rget on that same json forks nothing.
+# Call it in the shell that rget's callers run in (not in a $(...)). A json jq can't read leaves the cache off.
+# shellcheck disable=SC2016 # jq program
+rload() {
+  rg_json=$1 rg_ok=0
+  rg_station='' rg_status='' rg_tier='' rg_work_type='' rg_plan_first='' rg_reason='' rg_provider='' rg_reset='' rg_body_append='' rg_body_only='' rg_comment_url=''
+  rg_eval=$(printf '%s\n' "$1" | jq -r --arg nlq "'\"\$nl\"'" '[["rg_station", .station], ["rg_status", .status], ["rg_tier", .tier], ["rg_work_type", .work_type], ["rg_plan_first", .plan_first], ["rg_reason", .reason], ["rg_provider", .provider], ["rg_reset", .reset], ["rg_body_append", .body_append], ["rg_body_only", .body_only], ["rg_comment_url", .comment_url]]
+    | map(.[0] + "=" + ((.[1] // empty | tostring) // "" | @sh | gsub("\n"; $nlq))) | join(" ")' 2> /dev/null) || return 0
+  rg_eval=${rg_eval%"$cr"}
+  eval "$rg_eval"
+  rg_ok=1
+}
+# rget_cached <.field>: the field of the json rload read, exit 1 for a field it does not hold.
+rget_cached() {
+  case $1 in
+    .station) printf '%s\n' "$rg_station"; return 0 ;;
+    .status) printf '%s\n' "$rg_status"; return 0 ;;
+    .tier) printf '%s\n' "$rg_tier"; return 0 ;;
+    .work_type) printf '%s\n' "$rg_work_type"; return 0 ;;
+    .plan_first) printf '%s\n' "$rg_plan_first"; return 0 ;;
+    .reason) printf '%s\n' "$rg_reason"; return 0 ;;
+    .provider) printf '%s\n' "$rg_provider"; return 0 ;;
+    .reset) printf '%s\n' "$rg_reset"; return 0 ;;
+    .body_append) printf '%s\n' "$rg_body_append"; return 0 ;;
+    .body_only) printf '%s\n' "$rg_body_only"; return 0 ;;
+    .comment_url) printf '%s\n' "$rg_comment_url"; return 0 ;;
+  esac
+  return 1
+}
+rget() { if [ "${rg_ok:-0}" = 1 ] && [ "$1" = "${rg_json:-}" ] && rget_cached "$2"; then :; else printf '%s\n' "$1" | jq_lf -r "$2 // empty | tostring"; fi; }
 
 station_of() { printf '%s\n' "${1%% *}"; }
 round_of() { case " $1 " in *" r2 "*) echo 2 ;; *) echo 1 ;; esac; }
@@ -483,6 +512,7 @@ brief_for() {
     *)
       intake=$(find_task intake)
       ij=$(result_json "$intake")
+      rload "$ij"
       set -- "$@" --branch "$(branch)" --tier "$(rget "$ij" .tier)"
       [ "$st" = build ] && set -- "$@" --work-type "$(rget "$ij" .work_type)"
       if [ "$st" != build ] || [ "$rd" = 2 ]; then
@@ -615,6 +645,7 @@ start_worker() {
 need_result() {
   rj=$(result_json "$1")
   [ -n "$rj" ] || { echo "$2 result has no parseable factory-result line"; return 1; }
+  rload "$rj"
   [ "$(rget "$rj" .station)" = "$2" ] || { echo "$2 result names station [$(rget "$rj" .station)]"; return 1; }
   rs=$(rget "$rj" .status)
   # `reworked`, `not-run` and `body-fixed` are sf-act's own completions (plain text); a worker report claiming
@@ -662,6 +693,7 @@ review_tasks() {
 
 step_route() {
   if ! ij=$(need_result "$(find_task intake)" intake); then give_up "$2" route "$ij"; return 1; fi
+  rload "$ij"
   rt_tier=$(rget "$ij" .tier)
   rt_work=$(rget "$ij" .work_type)
   case "$rt_tier:$rt_work" in
@@ -1041,6 +1073,7 @@ act_stop() {
     stop_now "$title failed with no factory-result line" >&2
     return
   fi
+  rload "$rj"
   rs=$(rget "$rj" .station)
   status=$(rget "$rj" .status)
   [ "$rs" = "$st" ] || { stop_now "$title result names station [$rs]" >&2; return; }
