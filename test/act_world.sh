@@ -103,7 +103,9 @@ sim() { jq -r "$@" "$ORCA_SIM/state.json"; }
 sim_set() {
   f=$1
   shift
-  jq "$@" "$PROMOTE$f | promote" "$ORCA_SIM/state.json" > "$ORCA_SIM/new" && mv "$ORCA_SIM/new" "$ORCA_SIM/state.json"
+  # The state is held in a variable and written back in place: no mv (nothing else writes it while a test edits it).
+  ss_new=$(jq "$@" "$PROMOTE$f | promote" "$ORCA_SIM/state.json") || return 1
+  printf '%s\n' "$ss_new" > "$ORCA_SIM/state.json"
 }
 # status_of <title>: the status of the newest task with that title.
 status_of() { sim --arg t "$1" '[.tasks[] | select(.title == $t)] | last | .status // "none"'; }
