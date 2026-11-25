@@ -24,7 +24,7 @@ shell scripts keep deciding and gating, and an agent session does the dispatchin
 2. **Shell decides, agent dispatches.** `sf-state` prints the actions as now. `sf-act` carries out
    the GitHub-only ones (comments, labels, merge via `sf-ship`). For an action that needs a worker,
    `sf-act` prints one `{"dispatch": ...}` request (station, brief, branch, model) instead of
-   calling Orca; the foreman answers it with `delegate_task` (`isolation: worktree`), then records it.
+   calling Orca; the foreman answers it with `delegate_task` (`isolation: shared`; the script already made the worktree and recorded the dispatch).
 3. **State is GitHub plus the T3 thread list.** No local state file. See "Records" below for
    the formats (PR 3).
    - Runs, tasks, dispatches and results are marker comments on the issue.
@@ -36,7 +36,7 @@ shell scripts keep deciding and gating, and an agent session does the dispatchin
 4. **Contracts do not change.** Result-line JSON shapes, the evidence gate, the Opus verifier,
    the round limit, "merge only on a green gate with `--match-head-commit`".
 5. **Cleanup** (closed issue, Run over): `sf-act` emits a `cleanup` request with the worktree path;
-   the foreman removes it with the T3 worktree tools, then confirms.
+   the script has already removed the worktree and merged branch; the foreman only archives the listed threads.
 6. **Review model.** The review station runs as a T3 child on a Codex model where the host offers one.
 7. **The run cap is per repo.** Records are one repo's comments, so `FACTORY_MAX_RUNS` caps that repo's
    live Runs; there is no cap across repos and no `sf-tick` host lock. Intended: each repo has its own
