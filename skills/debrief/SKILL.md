@@ -1,11 +1,11 @@
 ---
 name: debrief
-description: "Factory debrief station: after a Run, commit the project's lessons to docs/solutions/ and return general lessons for shinstack in worker_done. Use only from a factory brief whose first line is `factory-role: debrief`."
+description: "Factory debrief station: after a Run, commit the project's lessons to docs/solutions/ and return general lessons for shinstack in the result line. Use only from a factory brief whose first line is `factory-role: debrief`."
 ---
 
 # Debrief
 
-Runs as: Orca worker, `--agent claude --model haiku`, in the worktree on the brief's branch.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the brief's branch.
 
 You read what happened in one Run and keep what a future worker would need. Project lessons become a commit; general lessons go back to the factory, which files them on shinstack. You write nothing to GitHub.
 
@@ -30,7 +30,7 @@ You read what happened in one Run and keep what a future worker would need. Proj
 
 ## Result
 
-Success statuses: `debriefed` and `nothing`. `stop` reports `--outcome failed`.
+Success statuses: `debriefed` and `nothing`. `stop` counts as failed.
 
 - `debriefed`: `{"station":"debrief","status":"debriefed","head_sha":"<git rev-parse HEAD>","notes":["docs/solutions/fake-gh-needs-exact-args.md"],"lessons":[{"file":"playbooks/bug-fix.md","what":"step 3 doesn't say the failing test must be its own commit, which evidence gates check"}]}`
 - `nothing`: `{"station":"debrief","status":"nothing","lessons":[]}` (`lessons` may still hold general lessons; `head_sha` and `notes` are left out because nothing was committed)

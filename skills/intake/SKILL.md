@@ -5,7 +5,7 @@ description: "Factory intake station: decide whether a ready issue can be built,
 
 # Intake
 
-Runs as: Orca worker, `--agent claude --model sonnet`, in the repo's main checkout. Read-only.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out (the repo's main branch). Read-only.
 
 You decide; the factory acts. Read the issue and return one decision in your result line. Never call `sf-stop` or `sf-hold`, never edit, label or comment on the issue, and never commit.
 
@@ -20,7 +20,7 @@ You decide; the factory acts. Read the issue and return one decision in your res
 
 ## Result
 
-Success status: `go`. Everything else reports `--outcome failed`.
+Success status: `go`. Anything else counts as failed.
 
 - `go`: `{"station":"intake","status":"go","tier":"medium","work_type":"feature","plan_first":false}`
 - `stop`: `{"station":"intake","status":"stop","reason":"no observable Done when: the issue says 'make onboarding better' and nothing a test can check"}`

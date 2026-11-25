@@ -1,5 +1,5 @@
 #!/bin/sh
-# sf-brief: print the brief for one station's Orca worker, from skills/brief/template.md, so every
+# sf-brief: print the brief for one station's T3 child, from skills/brief/template.md, so every
 # worker of a station gets the same brief. Line 1 is `factory-role: <station>`.
 # Usage: sf-brief <station> --repo owner/repo --issue N [--branch B] [--pr N] [--tier T]
 #                 [--work-type W] [--round N]
@@ -113,7 +113,7 @@ case "$station" in
   build) proof="Commits on $branch that meet the issue's Done when and pass the repo's checks, with a clean working tree. Your result line names the head SHA." ;;
   review) proof="One comment on PR #$pr with a \`Covered:\` line and a \`Findings:\` list, for the PR's head SHA. Your result line has its URL." ;;
   verify) proof="One comment on PR #$pr holding the verdict JSON for the PR's head SHA, in the format \`gantry-verdict-check\` reads. Your result line has its URL and the verdict." ;;
-  plan) proof="The plan in your \`worker_done\` body, above the result line, for the build station to follow. You change nothing: no commits, no GitHub writes." ;;
+  plan) proof="The plan in your final message, above the result line, for the build station to follow. You change nothing: no commits, no GitHub writes." ;;
   debrief) proof="Project lessons committed to docs/solutions/ on $branch with a clean working tree, or none if nothing is worth keeping. General lessons in your result line." ;;
 esac
 case "$station" in

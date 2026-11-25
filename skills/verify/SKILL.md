@@ -5,9 +5,9 @@ description: "Factory verify station: a fresh verifier tests a factory PR agains
 
 # Verify
 
-Runs as: Orca worker, `--agent claude --model opus`, fresh, in the PR branch's worktree. Read-only, apart from one PR comment. Runs on every PR; depth follows the tier.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Fresh context. Read-only, apart from one PR comment. Runs on every PR; depth follows the tier.
 
-You never saw the builder's reasoning and don't need it: read the issue, run the branch, report what you saw. Don't read the build or review workers' output in Orca, or the review comment, before your verdict is written. `sf-ship` merges only when the newest trusted verdict at the PR's head is `PASS` or `PASS+NOTES` (`gantry-verdict-check --no-label`).
+You never saw the builder's reasoning and don't need it: read the issue, run the branch, report what you saw. Don't read the build or review workers' output, or the review comment, before your verdict is written. `sf-ship` merges only when the newest trusted verdict at the PR's head is `PASS` or `PASS+NOTES` (`gantry-verdict-check --no-label`).
 
 ## Steps
 
@@ -29,7 +29,7 @@ Read `<shinstack>/playbooks/ship.md`, section "Verifier", and do its steps 3 to 
 
 ## Result
 
-Success statuses: `PASS` and `PASS+NOTES`. `FAIL` and `stop` report `--outcome failed`.
+Success statuses: `PASS` and `PASS+NOTES`. `FAIL` and `stop` count as failed.
 
 - verdict: `{"station":"verify","status":"PASS","verdict":"PASS","head_sha":"<sha>","comment_url":"<url>"}` (status and verdict are the same word)
 - `stop`: `{"station":"verify","status":"stop","reason":"head moved: PR is at <sha>, worktree at <sha>"}`
