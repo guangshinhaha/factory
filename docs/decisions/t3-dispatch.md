@@ -38,7 +38,10 @@ shell scripts keep deciding and gating, and an agent session does the dispatchin
 5. **Cleanup** (closed issue, Run over): `sf-act` emits a `cleanup` request with the worktree path;
    the foreman removes it with the T3 worktree tools, then confirms.
 6. **Review model.** The review station runs as a T3 child on a Codex model where the host offers one.
-7. **Orca is removed**, not kept behind a flag (CLAUDE.md: no backward compatibility).
+7. **The run cap is per repo.** Records are one repo's comments, so `FACTORY_MAX_RUNS` caps that repo's
+   live Runs; there is no cap across repos and no `sf-tick` host lock. Intended: each repo has its own
+   schedule, and the schedule never overlaps itself.
+8. **Orca is removed**, not kept behind a flag (CLAUDE.md: no backward compatibility).
 
 ## Seam
 

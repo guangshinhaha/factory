@@ -225,6 +225,9 @@ test_worker_stopped_without_reporting_is_nudged_once_then_stopped() {
   acts
   assert_eq "$(dispatch_of intake)" "$(requests_of send | jq -r '.send.dispatch')" "nudge target"
   assert_contains "$(fake_stdin)" "\"kind\":\"nudge\",\"dispatch\":\"$(dispatch_of intake)\""
+  nudge=$(requests_of send | jq -r '.send.body' | tr -d '\r')
+  assert_contains "$nudge" "end your final message with the factory-result line"
+  case "$nudge" in *worker_done*) fail "the nudge asks for worker_done: $nudge" ;; esac
   assert_eq dispatched "$(status_of intake)" "intake after the nudge"
   m=$(jq -cn --arg d "$(dispatch_of intake)" '{kind: "nudge", dispatch: $d}')
   timeline "[$READY_EVENT,$(marker_comment "$m" 2026-11-03T00:01:00Z)]"
@@ -454,6 +457,25 @@ test_a_restart_after_a_hold_fences_the_held_worker_first() {
   acts
   assert_eq dispatched "$(status_of intake)" "intake after the restart"
   assert_eq 2 "$(dispatch_count "$t")" "intake dispatches"
+}
+
+# sf-act reads a Run's tasks whole: a stray document before the real one is a failed read, as in sf-state.
+# A copy of the plugin whose orch_task_list_full prints that stray document first.
+test_a_task_list_with_a_second_document_is_not_trusted() {
+  world
+  acts
+  finish intake "$GO"
+  mkdir -p "$TEST_TMP/plugin"
+  cp -R "$FACTORY_ROOT/bin" "$FACTORY_ROOT/lib" "$TEST_TMP/plugin/"
+  cat >> "$TEST_TMP/plugin/lib/orch-t3.sh" <<'SH'
+orch_task_list_full() { echo '{"ok":false}'; echo '{"ok":true,"result":{"tasks":[]}}'; }
+SH
+  : > "$REQUESTS"
+  status=0
+  FACTORY_T3_REQUESTS=$REQUESTS sh "$TEST_TMP/plugin/bin/sf-act" --repo "$REPO" > "$TEST_TMP/out" 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "sf-act exit status"
+  assert_contains "$(cat "$TEST_TMP/err")" "not listed: task-list printed no task array"
+  assert_eq "" "$(requests_of dispatch)" "workers"
 }
 
 # Seen in the e2e: a worker ends its body's only line with the result instead of a line of its own.
