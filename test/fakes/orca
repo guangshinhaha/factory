@@ -1,6 +1,0 @@
-#!/bin/sh
-# Fake orca for tests: replays fixtures and logs every call (see fake-cli).
-# Runs fake-cli in this process (no second sh, no dirname).
-set -- orca "$@"
-# shellcheck source=test/fakes/fake-cli
-. "${0%/*}/fake-cli"

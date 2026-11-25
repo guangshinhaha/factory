@@ -5,7 +5,7 @@
 #
 # Each test gets PATH = <fakes dir>:<guard dir>:<this bin>:$PATH (this bin before an installed
 # factory's, so sf-act runs this checkout's sf-state). The fakes dir is
-# $FACTORY_FAKES (default test/fakes). The guard dir holds gh, orca and gantry-* gate shims
+# $FACTORY_FAKES (default test/fakes). The guard dir holds gh and gantry-* gate shims
 # that log and exit 99, so a call that finds no fake never reaches the real
 # CLI, and any guard hit fails the test even if the test ignored the error.
 set -u
@@ -51,7 +51,7 @@ run_unit() {
     TEST_TMP=$tmp/work
     PATH=$fakes:$results/guard:$FACTORY_ROOT/bin:$PATH
     # Even a real gh that slipped past the guard would have no credentials.
-    # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
+    # HOME moves too, so per-user config and credentials are out of reach.
     GH_CONFIG_DIR=$tmp/work/gh-config
     HOME=$tmp/work/home
     unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
@@ -91,7 +91,7 @@ results=$(mktemp -d "${TMPDIR:-/tmp}/factory-results.XXXXXX") || exit 1
 trap 'rm -rf "$results"' EXIT
 
 mkdir "$results/guard" || exit 1
-for tool in gh orca gantry-gate-evidence gantry-verdict-check; do
+for tool in gh gantry-gate-evidence gantry-verdict-check; do
   write_guard "$results/guard" "$tool"
 done
 

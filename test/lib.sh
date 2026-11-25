@@ -1,10 +1,10 @@
 # shellcheck shell=sh
 # Test helpers, sourced by test/run before each test file.
 # test/run sets these before a test function starts:
-#   FAKE_LOG       every fake gh/orca call, one line each
+#   FAKE_LOG       every fake gh call, one line each
 #   FAKE_FIXTURES  empty until use_fixtures picks a set
 #   TEST_TMP       scratch dir for this test, removed afterwards
-# PATH starts with the fakes dir, then a guard dir whose gh/orca fail the test.
+# PATH starts with the fakes dir, then a guard dir whose gh and gantry gates fail the test.
 
 # mkkey: the fakes' fixture key function, loaded once here instead of one `sh fake-cli --key` per call.
 # shellcheck source=/dev/null # not followed: fake-cli exits, which would mark the rest of this file unreachable
