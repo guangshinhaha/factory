@@ -5,7 +5,7 @@
 # `gh issue comment <n> -R <repo> --body-file -` stores the comment in $GH_SIM/comments.jsonl
 # (author $GH_SIM_AUTHOR, default OWNER) and logs like fake-cli (the call to $FAKE_LOG, the body to
 # $FAKE_LOG.stdin); `gh api repos/<repo>/issues/comments?... --paginate` prints the stored comments
-# as two pages, so a reader must join pages (logged unless $GH_SIM_QUIET is set). Every other call goes to the fixture fake.
+# as two pages (nothing, exit 0, when $GH_SIM_EMPTY is set), so a reader must join pages (logged unless $GH_SIM_QUIET is set). Every other call goes to the fixture fake.
 set -u
 store=$GH_SIM/comments.jsonl
 [ -f "$store" ] || : > "$store"
@@ -22,6 +22,7 @@ fi
 case "${1:-} ${2:-}" in
   "api repos/"*"/issues/comments?"*)
     [ -n "${GH_SIM_QUIET:-}" ] || [ -z "${FAKE_LOG:-}" ] || printf '%s\n' "gh $*" >> "$FAKE_LOG"
+    [ -z "${GH_SIM_EMPTY:-}" ] || exit 0
     jq -cs '(length / 2 | floor) as $h | .[0:$h], .[$h:]' "$store"
     exit 0
     ;;

@@ -26,7 +26,8 @@ t3_trusted='["OWNER","MEMBER","COLLABORATOR"]'
 # The fold: marker records ({issue, at, m}) in comment order into {runs, tasks{id: task}, disp{D: ...},
 # results{D: ...}}, the way Orca keeps them. A pending task whose deps are all completed turns ready
 # after every record, as Orca promotes on each update. A result counts only for the task's current,
-# still dispatched dispatch; only a dispatch's first result is read. A missing outcome is failed.
+# still dispatched dispatch; only a dispatch's first result is read. A task, dispatch, result or status
+# marker counts only on the issue of its Run (task) or task (the rest), never from another issue. A missing outcome is failed.
 # threads: the snapshot's threads (an error when the snapshot is bad); thread(D): D's thread, a live
 # one first. TERMINAL: thread statuses that mean the turn is over.
 T3_DEFS='
@@ -39,16 +40,16 @@ def fold: reduce .[] as $r ({runs: [], tasks: {}, disp: {}, results: {}};
   | if $m.kind == "run" then
       if any(.runs[]; .id == $m.run) then . else .runs += [{id: $m.run, objective: $m.objective, created_at: $r.at}] end
     elif $m.kind == "task" then
-      if .tasks[$m.task] != null then .
+      if .tasks[$m.task] != null or (any(.runs[]; .id == $m.run and (.objective | endswith("#\($r.issue)"))) | not) then .
       else .tasks[$m.task] = {id: $m.task, run: $m.run, issue: $r.issue, title: $m.title, deps: ($m.deps // []),
         spec: ($m.spec // ""), status: "pending", result: null, dispatch: null} end
     elif $m.kind == "dispatch" then
-      if .tasks[$m.task] == null or .disp[$m.dispatch] != null then .
+      if .tasks[$m.task] == null or .tasks[$m.task].issue != $r.issue or .disp[$m.dispatch] != null then .
       else .tasks[$m.task] |= (.status = "dispatched" | .dispatch = $m.dispatch)
         | .disp[$m.dispatch] = {task: $m.task, agent: $m.agent, model: $m.model, worktree: $m.worktree, at: $r.at} end
     elif $m.kind == "result" then
       $m.dispatch as $d | (if $m.outcome == "succeeded" then "succeeded" else "failed" end) as $o
-      | if .disp[$d] == null or .results[$d] != null then .
+      | if .disp[$d] == null or .tasks[.disp[$d].task].issue != $r.issue or .results[$d] != null then .
         else .results[$d] = {outcome: $o, body: ($m.body // "" | tostring)}
           | .disp[$d].task as $t
           | if .tasks[$t].dispatch == $d and .tasks[$t].status == "dispatched"
@@ -56,7 +57,7 @@ def fold: reduce .[] as $r ({runs: [], tasks: {}, disp: {}, results: {}};
               | .result = ({provenance: "worker", outcome: $o, body: ($m.body // "" | tostring)} | tojson))
             else . end end
     elif $m.kind == "status" then
-      if .tasks[$m.task] == null or (["completed","failed","ready"] | index($m.status)) == null then .
+      if .tasks[$m.task] == null or .tasks[$m.task].issue != $r.issue or (["completed","failed","ready"] | index($m.status)) == null then .
       else .tasks[$m.task] |= (.status = $m.status | if ($m.result // "") != "" then .result = $m.result else . end) end
     else . end
   | promote);
@@ -81,6 +82,7 @@ t3_records() {
   [ ! -f "$FACTORY_T3_CACHE" ] || return 0
   gh api "repos/$repo/issues/comments?sort=created&direction=asc&per_page=100" --paginate > "$FACTORY_T3_CACHE.raw" \
     || { echo "orch-t3: issue comments of $repo not read (gh api failed)" >&2; return 1; }
+  [ -s "$FACTORY_T3_CACHE.raw" ] || { echo "orch-t3: issue comments of $repo not read: gh api printed no output" >&2; return 1; }
   jq -cs --argjson trusted "$t3_trusted" '
     if all(.[]; type == "array") then (add // [])[] else error("orch-t3:shape") end
     | select(type == "object" and ((.author_association // "") as $a | $trusted | index($a)) != null)
@@ -398,8 +400,9 @@ orch_worktree_create() {
   t3_ok
 }
 
-# orch_worktree_rm <worktree>: remove it (git refuses a dirty one) and its branch when merged, then
-# write a cleanup request naming the threads that worked there. A path git no longer has is pruned.
+# orch_worktree_rm <worktree>: write a cleanup request naming the threads that worked there (first,
+# so a crash after the removal can't lose it), then remove the worktree (git refuses a dirty one)
+# and its branch when merged. A path git no longer has is pruned.
 orch_worktree_rm() {
   [ -n "${FACTORY_T3_REQUESTS:-}" ] || { echo "orch-t3: FACTORY_T3_REQUESTS is not set: no request file for the foreman" >&2; return 1; }
   t3_records || return 1
@@ -411,13 +414,13 @@ orch_worktree_rm() {
         worktree: $w, branch: (if $b == "" then null else $b end),
         threads: [$ds[] | {dispatch: ., thread: (if $snap == "yes" then thread(.).id // null else null end)}]}} | tojson') \
     || { echo "orch-t3: cleanup of worktree $1 not prepared: $(t3_why)" >&2; return 1; }
+  t3_request "${_wr_req%"$t3_cr"}" || return 1
   if [ -d "$1" ]; then
     git worktree remove "$1" > /dev/null 2>&1 || { echo "orch-t3: worktree $1 not removed (uncommitted changes?)" >&2; return 1; }
   else
     git worktree prune > /dev/null 2>&1 || :
   fi
   if [ -n "$_wr_b" ]; then git branch -q -d "$_wr_b" > /dev/null 2>&1 || :; fi
-  t3_request "${_wr_req%"$t3_cr"}" || return 1
   t3_ok
 }
 
