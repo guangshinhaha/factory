@@ -1,14 +1,14 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2016,SC2119 # jq programs in single quotes; orch_run_list takes an optional run id
 # lib/orch-t3.sh: the T3 orchestrator, called directly (in-process, as sf-state and sf-act source it)
-# and through sf-act fire after fire in the world of test/t3_world.sh.
+# and through sf-act fire after fire in the world of test/act_world.sh.
 
-# shellcheck source=test/t3_world.sh
-. "$FACTORY_ROOT/test/t3_world.sh"
+# shellcheck source=test/act_world.sh
+. "$FACTORY_ROOT/test/act_world.sh"
 
 # in_process: source the T3 functions here, as a script that set repo and tmp would.
 in_process() {
-  t3_world
+  world
   repo=$REPO
   tmp=$TEST_TMP/proc
   mkdir -p "$tmp"
@@ -38,7 +38,6 @@ test_runs_and_tasks_are_listed_from_marker_comments() {
   case "$run" in t3.7.*) ;; *) fail "Run id [$run] does not name issue 7" ;; esac
   next_process
   assert_eq "[{\"id\":\"$run\",\"objective\":\"factory acme/app#7\"}]" "$(orch_run_list | jq -c '[.result.runs[] | {id, objective}]')" "runs"
-  assert_eq null "$(orch_run_list | jq -c '.result.nextCursor')" "cursor"
   assert_eq "intake:ready route:pending" "$(orch_task_list "$run" | jq -r '[.result.tasks[] | "\(.title):\(.status)"] | join(" ")')" "concise tasks"
   full=$(orch_task_list_full "$run")
   assert_eq "[\"$it\"]" "$(printf '%s' "$full" | jq -r '.result.tasks[1].deps')" "route deps as text"
@@ -54,7 +53,6 @@ test_runs_and_tasks_are_listed_from_marker_comments() {
   orch_task_complete "$it" "lessons" > /dev/null
   next_process
   assert_eq "completed ready" "$(orch_task_list "$run" | jq -r '[.result.tasks[].status] | join(" ")')" "after complete"
-  no_orca_called
 }
 
 test_a_dispatched_thread_that_stopped_without_a_result_is_escalated_until_the_result_comes() {
@@ -68,7 +66,7 @@ test_a_dispatched_thread_that_stopped_without_a_result_is_escalated_until_the_re
   next_process
   assert_eq alive "$(orch_worker_show "$d" | jq -r .result.liveness)" "running thread"
   assert_eq '[]' "$(orch_inbox "$run" | jq -c .result.messages)" "inbox while running"
-  # Its turn ended and no result was posted: Orca's "stopped without reporting".
+  # Its turn ended and no result was posted: "stopped without reporting".
   thread "$d" completed 2026-11-03T00:00:00Z
   assert_eq exited "$(orch_worker_show "$d" | jq -r .result.liveness)" "completed thread"
   esc=$(orch_inbox "$run" | jq -c '.result.messages[0] | {type, subject, p: (.payload | fromjson), created_at}')
@@ -76,7 +74,7 @@ test_a_dispatched_thread_that_stopped_without_a_result_is_escalated_until_the_re
   # A failed intake thread is escalated too (no worktree row witnesses intake).
   thread "$d" failed 2026-11-03T00:00:00Z
   assert_eq 1 "$(orch_inbox "$run" | jq '.result.messages | length')" "failed intake escalated"
-  # The foreman posts the result: the task completes with Orca's worker report, the escalation ends.
+  # The foreman posts the result: the task completes with the worker's report, the escalation ends.
   result_marker "$d" "$GO"
   next_process
   assert_eq '[]' "$(orch_inbox "$run" | jq -c .result.messages)" "inbox after the result"
@@ -208,29 +206,8 @@ test_worktree_ps_shows_factory_branches_and_their_open_dispatches() {
   assert_contains "$(rows)" '"n":7,"repo":"app","a":[]'
 }
 
-test_terminal_and_automation_verbs_say_t3_has_none() {
-  in_process
-  assert_eq '[]' "$(orch_terminal_list "$TEST_TMP/app" | jq -c .result.terminals)" "terminals"
-  orch_terminal_close term_1 > /dev/null
-  if orch_terminal_create "$TEST_TMP/app" "sf-act acme/app" "true" 2> "$TEST_TMP/err"; then fail "terminal created"; fi
-  assert_contains "$(cat "$TEST_TMP/err")" "T3 has no terminals"
-  if orch_automation_list 2> "$TEST_TMP/err"; then fail "automations listed"; fi
-  assert_contains "$(cat "$TEST_TMP/err")" "T3 scheduled task"
-  if orch_automation_create factory '*/5 * * * *' p q "$TEST_TMP/app" 2> "$TEST_TMP/err"; then fail "automation created"; fi
-  assert_contains "$(cat "$TEST_TMP/err")" "schedule_task"
-}
-
-test_an_unknown_factory_orch_stops_the_script() {
-  st=0
-  FACTORY_ORCH=nomad sh "$FACTORY_ROOT/bin/sf-state" acme/app > "$TEST_TMP/out" 2> "$TEST_TMP/err" || st=$?
-  assert_eq 2 "$st" "exit status"
-  assert_contains "$(cat "$TEST_TMP/err")" "FACTORY_ORCH [nomad] is neither orca nor t3"
-}
-
-# ---- sf-act fire after fire on T3 (the act world's scenarios) -------------------------------------
-
 test_t3_a_fresh_issue_gets_one_run_with_intake_and_a_dispatch_request() {
-  t3_world
+  world
   acts
   assert_eq 1 "$(runs_count)" "Runs"
   assert_eq dispatched "$(status_of intake)" "intake"
@@ -244,22 +221,20 @@ test_t3_a_fresh_issue_gets_one_run_with_intake_and_a_dispatch_request() {
   assert_eq 2 "$(t3_q '.tasks | length')" "tasks after a second fire"
   assert_eq 1 "$(requests_of dispatch | wc -l | tr -d ' ')" "dispatch requests on the second fire"
   assert_eq 1 "$(dispatch_count "$(id_of intake)")" "intake dispatches"
-  no_orca_called
 }
 
 test_t3_go_builds_then_the_gate_opens_a_pr_and_review_is_dispatched() {
-  t3_world
+  world
   to_review
   assert_contains "$(worktree_of build)" "app.worktrees/app-7"
   assert_eq "$(git rev-parse origin/main)" "$(git -C "$(wt_path)" rev-parse HEAD)" "branch base"
   assert_contains "$(spec_of review)" "PR #12"
   assert_eq codex/codex-auto-review "$(agent_of review)" "review agent"
   assert_eq "acme/app#7 review [$(dispatch_of review)]" "$(requests_of dispatch | jq -r 'select(.dispatch.station == "review") | .dispatch.title')" "review request"
-  no_orca_called
 }
 
 test_t3_worker_stopped_without_reporting_is_nudged_once_then_stopped() {
-  t3_world
+  world
   acts
   escalation intake 2026-11-03T00:00:00Z
   : > "$REQUESTS"
@@ -275,11 +250,10 @@ test_t3_worker_stopped_without_reporting_is_nudged_once_then_stopped() {
   assert_eq failed "$(status_of intake)" "intake"
   assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "worker stopped without reporting, again after a nudge"
   assert_eq 1 "$(runs_count)" "Runs"
-  no_orca_called
 }
 
 test_t3_a_station_thread_that_failed_without_reporting_is_retried_once_then_stopped() {
-  t3_world
+  world
   to_review
   agent_ended failed
   : > "$REQUESTS"
@@ -298,11 +272,10 @@ test_t3_a_station_thread_that_failed_without_reporting_is_retried_once_then_stop
   stop=$(grep '^sf-stop' "$FAKE_LOG")
   assert_contains "$stop" "review agent ended with outcome=failure and no report, again after a retry"
   assert_contains "$stop" "Codex could not finish this response again."
-  no_orca_called
 }
 
 test_t3_a_merged_runs_worktree_is_removed_with_a_cleanup_request_and_a_second_fire_does_nothing() {
-  t3_world
+  world
   to_build
   w=$(wt_path)
   bd=$(dispatch_of build)
@@ -317,7 +290,6 @@ test_t3_a_merged_runs_worktree_is_removed_with_a_cleanup_request_and_a_second_fi
   : > "$REQUESTS"
   acts
   assert_eq "" "$(requests_of cleanup)" "cleanup on a second fire"
-  no_orca_called
 }
 
 test_gh_api_exiting_zero_with_no_output_is_an_error_not_no_records() {

@@ -1,5 +1,6 @@
 # shellcheck shell=sh
-# sf-state: the next actions, computed from GitHub (fake gh) and Orca (fake orca).
+# sf-state: the next actions, computed from GitHub (fake gh) and the orchestrator seam (the fake in
+# test/fakes/orch-fake.sh).
 # Each test builds its world inline with the helpers below. The repo is acme/app.
 
 REPO=acme/app
@@ -24,7 +25,10 @@ fixture_fail() {
 world() {
   FAKE_FIXTURES=$TEST_TMP/fx
   export FAKE_FIXTURES
-  mkdir -p "$FAKE_FIXTURES/gh" "$FAKE_FIXTURES/orca"
+  mkdir -p "$FAKE_FIXTURES/gh" "$FAKE_FIXTURES/orch" "$TEST_TMP/plugin/bin" "$TEST_TMP/plugin/lib"
+  cp "$FACTORY_ROOT/bin/sf-state" "$TEST_TMP/plugin/bin/"
+  cp "$FACTORY_ROOT/lib/factory.sh" "$FACTORY_ROOT/lib/orch.sh" "$TEST_TMP/plugin/lib/"
+  cp "$FACTORY_ROOT/test/fakes/orch-fake.sh" "$TEST_TMP/plugin/lib/orch-t3.sh"
   cd "$TEST_TMP" || fail "test dir not entered: $TEST_TMP"
   printf '# app\n\nshinstack-mode: auto\nfactory-concurrency: 2\n' > CLAUDE.md
   issues '[]'
@@ -37,20 +41,20 @@ world() {
 issues() { printf '%s\n' "$1" | fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body; }
 # prs <json>: open PRs; a PR without isCrossRepository is from the repo itself (false).
 prs() { printf '%s\n' "$1" | jq -c 'map(if type == "object" and (has("isCrossRepository") | not) then . + {isCrossRepository: false} else . end)' | prs_raw; }
-# worktrees <json>: Orca's `worktree ps` rows.
-worktrees() { printf '{"ok":true,"result":{"worktrees":%s,"totalCount":0,"truncated":false}}\n' "$1" | fixture orca worktree ps --json --limit 1000; }
-# wt <path> <branch> <issue> [live] [agents json]: a worktree row of repo app.
-wt() { printf '{"repo":"app","path":"%s","branch":"refs/heads/%s","isMainWorktree":false,"linkedIssue":%s,"liveTerminalCount":%s,"agents":%s}' "$1" "$2" "$3" "${4:-0}" "${5:-[]}"; }
+# worktrees <json>: the orch_worktree_ps rows.
+worktrees() { printf '{"ok":true,"result":{"worktrees":%s,"truncated":false}}\n' "$1" | fixture orch worktree-ps; }
+# wt <path> <branch> <issue> [agents json]: a worktree row of repo app.
+wt() { printf '{"repo":"app","path":"%s","branch":"refs/heads/%s","isMainWorktree":false,"linkedIssue":%s,"agents":%s}' "$1" "$2" "$3" "${4:-[]}"; }
 
 prs_raw() { fixture gh pr list -R "$REPO" --state open --limit 1000 --json number,headRefName,isCrossRepository; }
-runs() { printf '{"ok":true,"result":{"runs":%s,"nextCursor":null}}\n' "$1" | fixture orca orchestration run-list --json --full --limit 100; }
+runs() { printf '{"ok":true,"result":{"runs":%s}}\n' "$1" | fixture orch run-list; }
 # tasks <run> <json>: the Run's tasks, and an empty inbox (inbox_of sets escalations).
 tasks() {
-  printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orca orchestration task-list --run "$1" --json
+  printf '{"ok":true,"result":{"tasks":%s,"runId":"%s"}}\n' "$2" "$1" | fixture orch task-list "$1"
   inbox_of "$1" '[]'
 }
-inbox_of() { printf '{"ok":true,"result":{"messages":%s,"count":0}}\n' "$2" | fixture orca orchestration inbox --terminal "run:$1" --limit 500 --json --full; }
-# escalation <task> <dispatch> <created_at>: Orca's "stopped without reporting" message.
+inbox_of() { printf '{"ok":true,"result":{"messages":%s,"count":0}}\n' "$2" | fixture orch inbox "$1"; }
+# escalation <task> <dispatch> <created_at>: the inbox's "stopped without reporting" message.
 escalation() {
   jq -cn --arg t "$1" --arg d "$2" --arg at "$3" \
     '{type: "escalation", subject: "Worker stopped without reporting", payload: ({taskId: $t, dispatchId: $d, stopReason: "finished"} | tojson), created_at: $at}'
@@ -67,7 +71,7 @@ run_json() { printf '{"id":"%s","objective":"factory %s#%s","created_at":"%s"}' 
 attempt='<!-- factory:{\"kind\":\"attempt\"} -->'
 comment() { printf '{"event":"commented","author_association":"OWNER","body":"%s","created_at":"%s"}' "$1" "$2"; }
 
-sf_state() { sh "$FACTORY_ROOT/bin/sf-state" "$@"; }
+sf_state() { sh "$TEST_TMP/plugin/bin/sf-state" "$@"; }
 state() { sf_state "$REPO"; }
 
 test_fresh_ready_issue_starts() {
@@ -286,24 +290,27 @@ test_concurrency_defaults_to_two_without_the_claude_md_line() {
   assert_eq '[{"action":"start","issue":1},{"action":"start","issue":2}]' "$(state)" "actions"
 }
 
-test_host_wide_cap_reached_by_other_repos_starts_nothing() {
+test_run_cap_reached_starts_nothing_and_other_objectives_are_not_runs() {
   world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  runs "[$(run_json run_1 1 2026-11-02T00:00:00Z acme/one),$(run_json run_2 2 2026-11-02T00:00:00Z acme/two),$(run_json run_3 3 2026-11-02T00:00:00Z beta/three),{\"id\":\"run_x\",\"objective\":\"shinfactory stages for app\",\"created_at\":\"2026-11-02T00:00:00Z\"}]"
+  printf 'factory-concurrency: 10
+' > CLAUDE.md
+  issues "[$(ready_issue_json 1),$(ready_issue_json 2),$(ready_issue_json 3),$(ready_issue_json 7)]"
+  for n in 1 2 3 7; do readied "$n"; done
+  runs "[$(run_json run_1 1),$(run_json run_2 2),$(run_json run_3 3),{\"id\":\"run_x\",\"objective\":\"shinfactory stages for app\",\"created_at\":\"2026-11-02T00:00:00Z\"}]"
   for r in run_1 run_2 run_3; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
   status=0
   out=$(FACTORY_MAX_RUNS=3 sf_state "$REPO") || status=$?
   assert_eq 0 "$status" "exit status"
   assert_eq '[]' "$out" "actions"
-  assert_not_called "orca orchestration task-list --run run_x --json"
+  assert_not_called "orch task-list run_x"
 }
 
-test_host_wide_cap_defaults_to_four() {
+test_run_cap_defaults_to_four() {
   world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  runs "[$(run_json run_1 1 2026-11-02T00:00:00Z acme/one),$(run_json run_2 2 2026-11-02T00:00:00Z acme/two),$(run_json run_3 3 2026-11-02T00:00:00Z beta/three)]"
+  printf 'factory-concurrency: 10\n' > CLAUDE.md
+  issues "[$(ready_issue_json 1),$(ready_issue_json 2),$(ready_issue_json 3),$(ready_issue_json 7),$(ready_issue_json 8)]"
+  for n in 1 2 3 7 8; do readied "$n"; done
+  runs "[$(run_json run_1 1),$(run_json run_2 2),$(run_json run_3 3)]"
   for r in run_1 run_2 run_3; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions with 3 of 4 slots used"
 }
@@ -320,20 +327,6 @@ test_inline_depends_on_with_closed_issue_starts() {
   issues "[$(ready_issue_json 7 'Depends on #3 and #4')]"
   readied 7
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
-}
-
-test_paginates_run_list() {
-  world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  printf '{"ok":true,"result":{"runs":[%s],"nextCursor":"c2"}}\n' "$(run_json run_1 1 2026-11-02T00:00:00Z acme/one)" \
-    | fixture orca orchestration run-list --json --full --limit 100
-  printf '{"ok":true,"result":{"runs":[%s]}}\n' "$(run_json run_2 2 2026-11-02T00:00:00Z acme/two)" \
-    | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
-  for r in run_1 run_2; do tasks "$r" '[{"id":"t1","status":"dispatched","title":"build"}]'; done
-  out=$(FACTORY_MAX_RUNS=2 sf_state "$REPO")
-  assert_eq '[]' "$out" "actions"
-  assert_called "orca orchestration task-list --run run_2 --json"
 }
 
 test_never_calls_the_search_api() {
@@ -361,16 +354,16 @@ test_gh_failure_prints_no_actions_and_exits_non_zero() {
   assert_contains "$(cat "$TEST_TMP/err")" "sf-state: open issues not listed" "stderr"
 }
 
-test_orca_failure_prints_no_actions_and_exits_non_zero() {
+test_orchestrator_failure_prints_no_actions_and_exits_non_zero() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
-  fixture_fail orca orchestration run-list --json --full --limit 100
+  fixture_fail orch run-list
   status=0
   out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
   assert_eq '' "$out" "stdout"
-  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Orca Runs not listed" "stderr"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Runs not listed" "stderr"
 }
 
 test_bad_concurrency_value_is_an_error() {
@@ -533,17 +526,17 @@ test_timeline_without_a_ready_label_event_is_an_error() {
   assert_contains "$(cat "$TEST_TMP/err")" "sf-state: timeline of #7 has no ready label event" "stderr"
 }
 
-# 5: malformed Orca JSON fails closed instead of looking like no Runs.
+# 5: malformed orchestrator JSON fails closed instead of looking like no Runs.
 test_run_list_with_null_runs_is_an_error() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
-  printf '{"ok":true,"result":{"runs":null}}\n' | fixture orca orchestration run-list --json --full --limit 100
+  printf '{"ok":true,"result":{"runs":null}}\n' | fixture orch run-list
   status=0
   out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
   assert_eq '' "$out" "stdout"
-  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Orca Runs not listed" "stderr"
+  assert_contains "$(cat "$TEST_TMP/err")" "sf-state: Runs not listed" "stderr"
 }
 
 test_task_list_with_null_tasks_is_an_error() {
@@ -551,7 +544,7 @@ test_task_list_with_null_tasks_is_an_error() {
   issues "[$(ready_issue_json 7)]"
   readied 7
   runs "[$(run_json run_a 7)]"
-  printf '{"ok":true,"result":{"tasks":null}}\n' | fixture orca orchestration task-list --run run_a --json
+  printf '{"ok":true,"result":{"tasks":null}}\n' | fixture orch task-list run_a
   status=0
   out=$(sf_state "$REPO" 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
@@ -650,15 +643,6 @@ test_ready_label_event_without_a_time_is_an_error() {
   fails_with "sf-state: timeline of #7 has a label event with no UTC time"
 }
 
-test_run_list_repeating_its_cursor_is_an_error() {
-  world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100
-  printf '{"ok":true,"result":{"runs":[],"nextCursor":"c2"}}\n' | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
-  fails_with "sf-state: Orca Runs not listed: run-list repeated cursor [c2]"
-}
-
 # 31: each read is checked whole. A wrong-shaped document before a valid one fails closed,
 # instead of the shape check seeing only the last document.
 test_issue_list_with_a_bad_document_before_a_good_one_is_an_error() {
@@ -680,8 +664,8 @@ test_run_list_with_a_bad_document_before_a_good_one_is_an_error() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
-  printf '{"ok":false,"result":{"runs":[]}}\n{"ok":true,"result":{"runs":[],"nextCursor":null}}\n' | fixture orca orchestration run-list --json --full --limit 100
-  fails_with "sf-state: Orca Runs not listed"
+  printf '{"ok":false,"result":{"runs":[]}}\n{"ok":true,"result":{"runs":[]}}\n' | fixture orch run-list
+  fails_with "sf-state: Runs not listed"
 }
 
 test_task_list_with_a_bad_document_before_a_good_one_is_an_error() {
@@ -689,7 +673,7 @@ test_task_list_with_a_bad_document_before_a_good_one_is_an_error() {
   issues "[$(ready_issue_json 7)]"
   readied 7
   runs "[$(run_json run_a 7)]"
-  printf '{"ok":false,"result":{"tasks":[]}}\n{"ok":true,"result":{"tasks":[{"id":"t1","status":"dispatched","title":"build"}]}}\n' | fixture orca orchestration task-list --run run_a --json
+  printf '{"ok":false,"result":{"tasks":[]}}\n{"ok":true,"result":{"tasks":[{"id":"t1","status":"dispatched","title":"build"}]}}\n' | fixture orch task-list run_a
   fails_with "sf-state: tasks of Run run_a not listed"
 }
 
@@ -739,41 +723,13 @@ test_pr_with_a_huge_number_is_an_error() {
   fails_with "sf-state: open PRs not listed"
 }
 
-test_run_list_with_a_false_next_cursor_is_an_error() {
-  world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  printf '{"ok":true,"result":{"runs":[],"nextCursor":false}}\n' | fixture orca orchestration run-list --json --full --limit 100
-  fails_with "sf-state: Orca Runs not listed: nextCursor is not a string"
-}
-
-test_run_list_with_a_number_next_cursor_is_an_error() {
-  world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  printf '{"ok":true,"result":{"runs":[],"nextCursor":2}}\n' | fixture orca orchestration run-list --json --full --limit 100
-  fails_with "sf-state: Orca Runs not listed: nextCursor is not a string"
-}
-
 test_run_list_with_a_duplicate_run_id_is_an_error() {
   world
   issues "[$(ready_issue_json 7)]"
   readied 7
   runs "[$(run_json run_a 7),$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
-  fails_with "sf-state: Orca Runs not listed: Run id run_a is listed twice"
-}
-
-test_run_list_with_a_duplicate_run_id_across_pages_is_an_error() {
-  world
-  issues "[$(ready_issue_json 7)]"
-  readied 7
-  printf '{"ok":true,"result":{"runs":[%s],"nextCursor":"c2"}}\n' "$(run_json run_a 7)" \
-    | fixture orca orchestration run-list --json --full --limit 100
-  printf '{"ok":true,"result":{"runs":[%s]}}\n' "$(run_json run_a 7)" \
-    | fixture orca orchestration run-list --json --full --limit 100 --cursor c2
-  tasks run_a '[{"id":"t1","status":"dispatched","title":"build"}]'
-  fails_with "sf-state: Orca Runs not listed: Run id run_a is listed twice"
+  fails_with "sf-state: Runs not listed: Run id run_a is listed twice"
 }
 
 test_timeline_with_a_null_event_is_an_error() {
@@ -838,7 +794,7 @@ test_failed_inbox_read_is_an_error() {
   readied 7
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"dispatched","title":"verify"}]'
-  fixture orca orchestration inbox --terminal run:run_a --limit 500 --json --full < /dev/null
+  fixture orch inbox run_a < /dev/null
   fixture_exit 1 "boom"
   status=0
   out=$(state 2> "$TEST_TMP/err") || status=$?
@@ -893,7 +849,7 @@ test_closed_issue_live_run_in_a_rebase_round_is_abandoned() {
 
 retry_marker() { comment "<!-- factory:{\\\"kind\\\":\\\"retry\\\",\\\"task\\\":\\\"$1\\\"} -->" "$2"; }
 # failed_agent_wt <branch>: the issue-7 worktree of that branch, whose only agent ended with outcome=failure.
-failed_agent_wt() { wt "/w/$1" "$1" 7 0 '[{"mainAgent":{"state":"done","outcome":"failure"}}]'; }
+failed_agent_wt() { wt "/w/$1" "$1" 7 '[{"mainAgent":{"state":"done","outcome":"failure"}}]'; }
 
 test_station_agent_that_ended_with_failure_and_no_report_is_retried_once() {
   world
@@ -943,9 +899,9 @@ test_agent_failure_needs_every_agent_of_the_worktree_done() {
   readied 7
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"dispatched","title":"review"}]'
-  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"mainAgent":{"state":"done","outcome":"failure"}},{"mainAgent":{"state":"working"}}]')]"
+  worktrees "[$(wt /w/app-7 app-7 7 '[{"mainAgent":{"state":"done","outcome":"failure"}},{"mainAgent":{"state":"working"}}]')]"
   assert_eq '[]' "$(state)" "another agent still working"
-  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"mainAgent":{"state":"done","outcome":"success"}}]')]"
+  worktrees "[$(wt /w/app-7 app-7 7 '[{"mainAgent":{"state":"done","outcome":"success"}}]')]"
   assert_eq '[]' "$(state)" "agent succeeded"
   worktrees "[$(wt /w/app-7 app-7 7)]"
   assert_eq '[]' "$(state)" "no agent"
@@ -966,7 +922,7 @@ test_cleanup_waits_for_an_open_issue_an_agent_or_a_live_run() {
   worktrees "[$(wt /w/app-7 app-7 7)]"
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "open issue"
   issues '[]'
-  worktrees "[$(wt /w/app-7 app-7 7 0 '[{"state":"working"}]')]"
+  worktrees "[$(wt /w/app-7 app-7 7 '[{"state":"working"}]')]"
   assert_eq '[]' "$(state)" "live agent"
   worktrees "[$(wt /w/app-7 app-7 7)]"
   runs "[$(run_json run_a 7)]"
@@ -974,19 +930,17 @@ test_cleanup_waits_for_an_open_issue_an_agent_or_a_live_run() {
   assert_eq '[{"action":"abandon","issue":7,"run":"run_a","reason":"issue #7 closed before merge"}]' "$(state)" "live run"
 }
 
-test_cleanup_does_not_wait_for_idle_terminals_only_for_an_agent() {
+test_cleanup_waits_for_an_agent_in_either_worktree() {
   world
-  worktrees "[$(wt /w/app-7 app-7 7 2), $(wt /w/debrief-app-7 debrief-app-7 7 1)]"
-  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"},{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "terminals only"
-  worktrees "[$(wt /w/app-7 app-7 7 2 '[{"state":"working"}]')]"
-  assert_eq '[]' "$(state)" "terminals and an agent"
+  worktrees "[$(wt /w/app-7 app-7 7 '[{"state":"working"}]'), $(wt /w/debrief-app-7 debrief-app-7 7)]"
+  assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/debrief-app-7"}]' "$(state)" "one agent"
 }
 
 test_cleanup_keeps_a_worktree_whose_branch_has_an_open_pr() {
   world
   runs "[$(run_json run_a 7)]"
   tasks run_a '[{"id":"t1","status":"completed","title":"lessons"}]'
-  worktrees "[$(wt /w/app-7 app-7 7 0), $(wt /w/debrief-app-7 debrief-app-7 7 1)]"
+  worktrees "[$(wt /w/app-7 app-7 7), $(wt /w/debrief-app-7 debrief-app-7 7)]"
   prs '[{"number":70,"headRefName":"debrief-app-7"}]'
   assert_eq '[{"action":"cleanup","issue":7,"worktree":"/w/app-7"}]' "$(state)" "docs PR open"
   prs '[]'
@@ -1004,25 +958,25 @@ test_cleanup_follows_a_finished_run_of_a_closed_issue() {
 test_cleanup_never_touches_a_worktree_the_factory_did_not_make() {
   world
   worktrees "[
-    {\"repo\":\"app\",\"path\":\"/main\",\"branch\":\"refs/heads/app-7\",\"isMainWorktree\":true,\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]},
+    {\"repo\":\"app\",\"path\":\"/main\",\"branch\":\"refs/heads/app-7\",\"isMainWorktree\":true,\"linkedIssue\":7,\"agents\":[]},
     $(wt /w/mine feature-x 7),
     $(wt /w/app-8 app-8 7),
     $(wt /w/nolink app-7 null),
     $(wt /w/app-9 app-9 9 | jq -c '.repo = "other"'),
     $(wt /w/xapp-7 xapp-7 7),
     {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"},
-    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]}]"
+    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"agents\":[]}]"
   assert_eq '[]' "$(state)" "actions"
 }
 
 test_a_worktree_list_with_a_non_object_entry_prints_nothing() {
   world
-  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orca worktree ps --json --limit 1000
+  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orch worktree-ps
   status=0
   out=$(state 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
   assert_eq '' "$out" "stdout"
-  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
+  assert_contains "$(cat "$TEST_TMP/err")" "worktrees not listed"
 }
 
 test_an_issue_without_labels_is_named_as_the_issue_list_not_the_worktrees() {
@@ -1038,23 +992,23 @@ test_an_issue_without_labels_is_named_as_the_issue_list_not_the_worktrees() {
 test_bad_worktrees_are_named_before_a_bad_issue() {
   world
   issues '[{"number":7,"body":""}]'
-  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orca worktree ps --json --limit 1000
+  printf '{"ok":true,"result":{"worktrees":[1]}}\n' | fixture orch worktree-ps
   status=0
   out=$(state 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
   assert_eq '' "$out" "stdout"
-  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
+  assert_contains "$(cat "$TEST_TMP/err")" "worktrees not listed"
 }
 
 test_a_worktree_read_that_fails_prints_nothing() {
   world
-  fixture_fail orca worktree ps --json --limit 1000
+  fixture_fail orch worktree-ps
   status=0
   out=$(state 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status"
   assert_eq '' "$out" "stdout"
-  assert_contains "$(cat "$TEST_TMP/err")" "Orca worktrees not listed"
-  printf '{"ok":true,"result":{"worktrees":"x"}}\n' | fixture orca worktree ps --json --limit 1000
+  assert_contains "$(cat "$TEST_TMP/err")" "worktrees not listed"
+  printf '{"ok":true,"result":{"worktrees":"x"}}\n' | fixture orch worktree-ps
   status=0
   out=$(state 2> "$TEST_TMP/err") || status=$?
   assert_eq 1 "$status" "exit status on a bad list"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake CLI shared by test/fakes/gh and test/fakes/orca.
+# Fake CLI shared by test/fakes/gh, the gantry gate fakes and test/fakes/orch-fake.sh.
 # Usage: fake-cli <tool> [args...]
 #
 # Logs the call to $FAKE_LOG as one line ("<tool> <args...>"), then replays the

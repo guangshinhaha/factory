@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # Tests for the harness itself: the fakes replay fixtures, and the guard
-# fails any test that reaches a real gh or orca.
+# fails any test that reaches a real gh or gantry gate.
 
 test_fake_gh_replays_fixture_and_logs_call() {
   use_fixtures harness
@@ -9,11 +9,11 @@ test_fake_gh_replays_fixture_and_logs_call() {
   assert_called "gh issue list -R guangshinhaha/factory --label ready --json number,title"
 }
 
-test_fake_orca_replays_fixture_and_logs_call() {
+test_each_fake_logs_under_its_own_tool_name() {
   use_fixtures harness
-  out=$(orca run list --json)
-  assert_eq '[{"id":"run-1","status":"running"}]' "$out" "orca output"
-  assert_called "orca run list --json"
+  out=$(gantry-gate-evidence run list --json)
+  assert_eq '[{"id":"run-1","status":"running"}]' "$out" "gantry-gate-evidence output"
+  assert_called "gantry-gate-evidence run list --json"
   assert_not_called "gh run list --json"
 }
 
@@ -43,7 +43,7 @@ test_guard_fails_a_test_when_the_gh_fake_is_missing() {
     || fail "guard case failed with the fake present: $(cat "$TEST_TMP/with-fake")"
 
   mkdir "$TEST_TMP/fakes"
-  cp "$FACTORY_ROOT/test/fakes/fake-cli" "$FACTORY_ROOT/test/fakes/orca" "$TEST_TMP/fakes/"
+  cp "$FACTORY_ROOT/test/fakes/fake-cli" "$FACTORY_ROOT/test/fakes/gantry-gate-evidence" "$TEST_TMP/fakes/"
   status=0
   FACTORY_FAKES=$TEST_TMP/fakes "$FACTORY_ROOT/test/run" "$case_file" > "$TEST_TMP/no-fake" 2>&1 || status=$?
   assert_eq 1 "$status" "runner status with the gh fake deleted"

@@ -1,10 +1,12 @@
 #!/bin/sh
 # shellcheck disable=SC2016 # jq programs in single quotes
 # A fake gh with stateful issue comments, for the T3 orchestrator (lib/orch-t3.sh). Not on PATH by
-# itself: a test puts a `gh` wrapper that sources it in front of test/fakes (see test/t3_world.sh).
+# itself: a test puts a `gh` wrapper that sources it in front of test/fakes (see test/act_world.sh).
 # `gh issue comment <n> -R <repo> --body-file -` stores the comment in $GH_SIM/comments.jsonl
 # (author $GH_SIM_AUTHOR, default OWNER) and logs like fake-cli (the call to $FAKE_LOG, the body to
-# $FAKE_LOG.stdin); `gh api repos/<repo>/issues/comments?... --paginate` prints the stored comments
+# $FAKE_LOG.stdin). While $GH_SIM/fail/<kind> exists, a comment carrying that factory marker is not
+# stored: its text goes to stderr and the call exits 1 ($GH_SIM/fail/<kind>.after lets that many
+# through first). `gh api repos/<repo>/issues/comments?... --paginate` prints the stored comments
 # as two pages (nothing, exit 0, when $GH_SIM_EMPTY is set), so a reader must join pages (logged unless $GH_SIM_QUIET is set). Every other call goes to the fixture fake.
 set -u
 store=$GH_SIM/comments.jsonl
@@ -14,6 +16,16 @@ if [ "${1:-}" = issue ] && [ "${2:-}" = comment ]; then
   body=$(cat)
   [ -z "${FAKE_LOG:-}" ] || printf '%s\n' "$body" >> "$FAKE_LOG.stdin"
   repo=$5
+  kind=$(printf '%s\n' "$body" | sed -n 's/.*<!-- factory:{"kind":"\([a-z-]*\)".*/\1/p' | tail -n 1)
+  if [ -n "$kind" ] && [ -f "$GH_SIM/fail/$kind" ]; then
+    left=0
+    { read -r left; } 2> /dev/null < "$GH_SIM/fail/$kind.after" || left=0
+    if [ "$left" -le 0 ]; then
+      cat "$GH_SIM/fail/$kind" >&2
+      exit 1
+    fi
+    echo $((left - 1)) > "$GH_SIM/fail/$kind.after"
+  fi
   jq -cn --arg n "$3" --arg repo "$repo" --arg b "$body" --arg a "${GH_SIM_AUTHOR:-OWNER}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{issue_url: "https://api.github.com/repos/\($repo)/issues/\($n)", author_association: $a, body: $b, created_at: $at}' >> "$store"
   echo "https://github.com/$repo/issues/$3#issuecomment"

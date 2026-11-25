@@ -38,14 +38,17 @@ shell scripts keep deciding and gating, and an agent session does the dispatchin
 5. **Cleanup** (closed issue, Run over): `sf-act` emits a `cleanup` request with the worktree path;
    the foreman removes it with the T3 worktree tools, then confirms.
 6. **Review model.** The review station runs as a T3 child on a Codex model where the host offers one.
-7. **Orca is removed**, not kept behind a flag (CLAUDE.md: no backward compatibility).
+7. **The run cap is per repo.** Records are one repo's comments, so `FACTORY_MAX_RUNS` caps that repo's
+   live Runs; there is no cap across repos and no `sf-tick` host lock. Intended: each repo has its own
+   schedule, and the schedule never overlaps itself.
+8. **Orca is removed**, not kept behind a flag (CLAUDE.md: no backward compatibility).
 
 ## Seam
 
 `lib/orch.sh` (PR #114) holds every call to the dispatch layer behind `orch_*` functions.
-`FACTORY_ORCH=t3` sources `lib/orch-t3.sh`, which defines the same functions with the same
-arguments, exit codes and output shapes, so `sf-state` and `sf-act` are unchanged. The default stays
-`orca` until PR 6 deletes the Orca code and its fakes.
+PR 3 added `lib/orch-t3.sh` with the same function names, arguments, exit codes and output shapes,
+behind a temporary switch. PR 6 removed the switch and the Orca implementation: `lib/orch.sh` is now
+the contract and sources `lib/orch-t3.sh`.
 
 ## Records (PR 3)
 
@@ -94,8 +97,7 @@ inbox read, so a crashed fire converges.
   by the script itself. `sf-act` needs the path at once (`prep` reads it back), so this cannot wait
   for a request. Removal refuses a dirty tree, and the branch is deleted only if it is merged
   (`git branch -d`). `cleanup` tells the foreman to archive the listed threads.
-- Terminal verbs: list prints `[]`, close does nothing, create fails. Automation verbs fail and
-  point to `schedule_task` (PR 4).
+- The seam has no terminal or automation verbs; the schedule is a `schedule_task` call (PR 4).
 
 ## Stopped without reporting
 

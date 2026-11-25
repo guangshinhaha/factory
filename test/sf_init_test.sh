@@ -1,7 +1,7 @@
 # shellcheck shell=sh
-# sf-init: labels, risky paths + CLAUDE.md keys via a PR, Orca automation; a rerun writes nothing.
+# sf-init: labels, risky paths + CLAUDE.md keys via a PR, the foreman schedule call; a rerun writes nothing.
 # Repo acme/app. git is real: origin is git@github.com:acme/app.git, which a fake ssh serves from
-# bare repos under $TEST_TMP/remote. gh and orca are fakes.
+# bare repos under $TEST_TMP/remote. gh is a fake.
 
 REPO=acme/app
 LABELS_Q='.[].name'
@@ -15,8 +15,6 @@ TITLE='chore: set up the factory (sf-init)'
 world() {
   FAKE_FIXTURES=$TEST_TMP/fx
   export FAKE_FIXTURES
-  # What sf-init gives Orca as the precheck: this PATH, and sf-tick by its absolute path.
-  PRECHECK="PATH='$PATH' sh '$FACTORY_ROOT/bin/sf-tick'"
   ORIGIN=$TEST_TMP/remote/acme/app.git
   WS=$TEST_TMP/ws
   init_world_copy "$TEST_TMP"
@@ -30,9 +28,6 @@ world() {
   echo main | fixture gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name
   open_pr '[]'
   echo "$PR_URL" | fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file -
-  automations '[]'
-  echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck "$PRECHECK" --workspace "path:$WS" --json
 }
 labels() { printf '%s\n' "$1" | fixture gh label list -R "$REPO" --limit 1000 --json name -q "$LABELS_Q"; }
 label_create() {
@@ -45,10 +40,11 @@ label_create() {
   fixture gh label create "$1" -R "$REPO" --color "$c" --description "$d"
 }
 open_pr() { printf '%s\n' "$1" | fixture gh pr list -R "$REPO" --head factory-init --state open --json url,isCrossRepository; }
-automations() { printf '{"ok":true,"result":{"automations":%s,"items":[]}}\n' "$1" | fixture orca automations list --json; }
 sf_init() { sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO" --workspace "$WS" "$@"; }
 remote_file() { git -C "$ORIGIN" show "$1:$2"; }
-writes() { grep -E '^(gh label create|gh pr create|orca automations create)' "$FAKE_LOG" || :; }
+writes() { grep -E '^(gh label create|gh pr create)' "$FAKE_LOG" || :; }
+# schedule_call <output file>: the schedule_task call sf-init printed there.
+schedule_call() { sed -n 's/^sf-init: if list_scheduled_tasks .* with: //p' "$1" | tr -d '\r'; }
 
 test_first_run_creates_everything() {
   world
@@ -57,7 +53,7 @@ test_first_run_creates_everything() {
   for l in ready needs-shin icebox risk:high; do assert_eq 1 "$(count_calls "gh label create $l ")" "creates of $l"; done
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
   assert_contains "$(fake_stdin)" "gantry-risky-paths"
-  assert_eq 1 "$(count_calls "orca automations create")" "automations"
+  assert_eq factory-acme/app "$(schedule_call "$TEST_TMP/out" | jq -r .title | tr -d '\r')" "scheduled task title"
   assert_eq "$main_before" "$(git -C "$ORIGIN" rev-parse main)" "origin main"
   assert_eq "lefthook.yml
 .github/workflows/**" "$(remote_file factory-init .github/gantry-risky-paths)" "risky paths"
@@ -72,25 +68,25 @@ factory-sensitive: false
 keep me" "$(remote_file factory-init CLAUDE.md)" "CLAUDE.md"
   assert_eq "$main_before" "$(git -C "$ORIGIN" rev-parse factory-init~1)" "factory-init parent"
   assert_eq 1 "$(git -C "$WS" worktree list --porcelain | grep -c '^worktree')" "worktrees left in the workspace"
-  assert_contains "$(cat "$TEST_TMP/out")" "sf-init: acme/app set up"
+  assert_contains "$(cat "$TEST_TMP/out")" "sf-init: acme/app set up except the foreman schedule"
 }
 
 test_second_run_writes_nothing() {
   world
   sf_init > /dev/null
-  # GitHub and Orca now have it all; the PR is still open.
+  # GitHub now has it all; the PR is still open.
   labels "ready
 needs-shin
 icebox
 risk:high"
   open_pr '[{"url":"'"$PR_URL"'","isCrossRepository":false}]'
-  automations '[{"id":"a1","name":"factory-acme/app"}]'
   branch_before=$(git -C "$ORIGIN" rev-parse factory-init)
   : > "$FAKE_LOG"
   sf_init > "$TEST_TMP/out"
-  assert_eq "" "$(writes)" "gh/orca writes on the second run"
+  assert_eq "" "$(writes)" "gh writes on the second run"
   assert_eq "$branch_before" "$(git -C "$ORIGIN" rev-parse factory-init)" "factory-init"
   assert_contains "$(cat "$TEST_TMP/out")" "file changes wait on $PR_URL"
+  assert_contains "$(cat "$TEST_TMP/out")" "foreman: not scheduled"
 }
 
 test_run_after_the_pr_merged_writes_nothing() {
@@ -99,13 +95,12 @@ test_run_after_the_pr_merged_writes_nothing() {
 needs-shin
 icebox
 risk:high"
-  automations '[{"id":"a1","name":"factory-acme/app"}]'
   mkdir -p "$TEST_TMP/seed/.github"
   printf '# mine\nskills/**\nlefthook.yml  # checks\n.github/workflows/**\n' > "$TEST_TMP/seed/.github/gantry-risky-paths"
   printf 'shinstack-mode: auto\nfactory-concurrency: 2\nfactory-sensitive: false\n' > "$TEST_TMP/seed/CLAUDE.md"
   seed_commit
   sf_init > "$TEST_TMP/out"
-  assert_eq "" "$(writes)" "gh/orca writes"
+  assert_eq "" "$(writes)" "gh writes"
   assert_eq 0 "$(count_calls "gh pr list")" "PR lookups"
   assert_contains "$(cat "$TEST_TMP/out")" "already set up on main"
 }
@@ -115,7 +110,6 @@ test_partial_setup_is_completed_and_values_kept() {
   labels "Ready
 bug
 icebox"
-  automations '[{"id":"a1","name":"factory-other"}]'
   mkdir -p "$TEST_TMP/seed/.github"
   printf 'skills/**\nlefthook.yml' > "$TEST_TMP/seed/.github/gantry-risky-paths"
   printf 'shinstack-mode: supervised\nshinstack-mode.merge: ask\nfactory-concurrency: 4\n' > "$TEST_TMP/seed/CLAUDE.md"
@@ -129,7 +123,6 @@ lefthook.yml
 shinstack-mode.merge: ask
 factory-sensitive: false
 factory-concurrency: 4" "$(remote_file factory-init CLAUDE.md)" "CLAUDE.md"
-  assert_eq 1 "$(count_calls "orca automations create --name factory-acme/app ")" "automation creates"
 }
 
 test_claude_md_without_shinstack_mode_gets_the_keys_appended() {
@@ -159,14 +152,14 @@ test_pushed_without_a_pr_reruns_to_a_pr() {
   fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file - < /dev/null
   fixture_exit 1 "HTTP 502"
   status=0
-  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
+  sf_init > "$TEST_TMP/out" 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "exit with gh pr create failing"
   assert_contains "$(cat "$TEST_TMP/err")" "factory-init pushed but no PR open"
-  assert_eq 0 "$(count_calls "orca automations create")" "automations after the failure"
+  assert_eq "" "$(schedule_call "$TEST_TMP/out")" "schedule call after the failure"
   echo "$PR_URL" | fixture gh pr create -R "$REPO" --base main --head factory-init --title "$TITLE" --body-file -
-  sf_init > /dev/null
+  sf_init > "$TEST_TMP/out"
   assert_eq 2 "$(count_calls "gh pr create")" "PR creates"
-  assert_eq 1 "$(count_calls "orca automations create")" "automations"
+  assert_contains "$(schedule_call "$TEST_TMP/out")" "factory-acme/app"
 }
 
 test_label_create_failure_exits_1() {
@@ -178,16 +171,6 @@ test_label_create_failure_exits_1() {
   assert_eq 1 "$status" "exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "label icebox missing from acme/app"
   assert_eq 0 "$(count_calls "gh pr create")" "PRs"
-}
-
-test_unreadable_automation_list_creates_nothing() {
-  world
-  echo '{"ok":false,"error":"boom"}' | fixture orca automations list --json
-  status=0
-  sf_init > /dev/null 2> "$TEST_TMP/err" || status=$?
-  assert_eq 1 "$status" "exit status"
-  assert_contains "$(cat "$TEST_TMP/err")" "Orca automations list unreadable"
-  assert_eq 0 "$(count_calls "orca automations create")" "automation creates"
 }
 
 test_workspace_of_another_repo_exits_2_without_writes() {
@@ -203,10 +186,8 @@ test_default_workspace_is_the_main_checkout() {
   world
   git -C "$WS" worktree add -q --detach "$TEST_TMP/side"
   main=$WS # the side worktree's main checkout, in git's form
-  echo '{"ok":true}' | fixture orca automations create --name factory-acme/app --trigger '*/5 * * * *' --provider claude \
-    --prompt /factory:foreman --precheck "$PRECHECK" --workspace "path:$main" --json
-  (cd "$TEST_TMP/side" && sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO") > /dev/null
-  assert_called "orca automations create --name factory-acme/app --trigger */5 * * * * --provider claude --prompt /factory:foreman --precheck $PRECHECK --workspace path:$main --json"
+  (cd "$TEST_TMP/side" && sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO") > "$TEST_TMP/out"
+  assert_contains "$(schedule_call "$TEST_TMP/out" | jq -r .prompt | tr -d '\r')" "in the repo's main checkout at $main."
 }
 
 test_bad_arguments_exit_2() {
@@ -264,14 +245,6 @@ test_second_push_url_of_another_host_exits_2_without_writes() {
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
 
-# The name carries the owner, so other/app's automation is not acme/app's.
-test_automation_of_a_same_named_repo_does_not_count() {
-  world
-  automations '[{"id":"a1","name":"factory-other/app"}]'
-  sf_init > /dev/null
-  assert_eq 1 "$(count_calls "orca automations create --name factory-acme/app ")" "automation creates"
-}
-
 test_symlinked_claude_md_exits_1_naming_it() {
   world
   git -C "$TEST_TMP/seed" mv CLAUDE.md AGENTS.md
@@ -311,7 +284,7 @@ test_target_repo_hooks_do_not_block_setup() {
   done
 }
 
-# A headless Orca run has no signing agent, so a repo or global commit.gpgSign=true would fail the
+# A headless agent run has no signing agent, so a repo or global commit.gpgSign=true would fail the
 # commit. The PR's CI is the gate; the commit goes unsigned.
 test_commit_gpgsign_does_not_block_setup() {
   world
@@ -380,34 +353,16 @@ test_missing_gantry_gates_exit_1_naming_the_command_before_any_write() {
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
 
-test_t3_prints_the_schedule_task_call_and_reports_the_foreman_unscheduled() {
+test_prints_the_schedule_task_call_and_reports_the_foreman_unscheduled() {
   world
-  FACTORY_ORCH=t3
-  export FACTORY_ORCH
-  sf_init > "$TEST_TMP/out" || fail "sf-init failed under t3"
+  sf_init > "$TEST_TMP/out" || fail "sf-init failed"
   out=$(cat "$TEST_TMP/out")
   assert_contains "$out" "foreman: not scheduled"
   assert_contains "$out" "$REPO set up except the foreman schedule"
-  call=$(sed -n 's/^sf-init: if list_scheduled_tasks .* with: //p' "$TEST_TMP/out" | tr -d '\r')
+  call=$(schedule_call "$TEST_TMP/out")
   assert_eq factory-acme/app "$(printf '%s' "$call" | jq -r .title | tr -d '\r')" "task title"
   assert_eq 300000 "$(printf '%s' "$call" | jq -r .schedule.everyMs | tr -d '\r')" "interval"
   assert_eq interval "$(printf '%s' "$call" | jq -r .schedule.type | tr -d '\r')" "schedule type"
   assert_contains "$(printf '%s' "$call" | jq -r .prompt)" "factory:foreman skill with the argument acme/app"
-  # The setup it can do is still done, and no Orca call is made.
   assert_eq 1 "$(count_calls "gh pr create")" "PRs"
-  assert_eq 0 "$(count_calls "orca ")" "orca calls"
-}
-
-test_t3_rerun_writes_nothing() {
-  world
-  FACTORY_ORCH=t3
-  export FACTORY_ORCH
-  labels "ready
-needs-shin
-icebox
-risk:high"
-  open_pr "[{\"url\":\"$PR_URL\",\"isCrossRepository\":false}]"
-  sf_init > "$TEST_TMP/out" || fail "sf-init failed under t3"
-  assert_eq "" "$(writes)" "writes"
-  assert_contains "$(cat "$TEST_TMP/out")" "foreman: not scheduled"
 }

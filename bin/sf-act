@@ -1,16 +1,13 @@
 #!/bin/sh
-# sf-act: carry out sf-state's actions for one repo. sf-tick spawns it in an Orca terminal (a
-# precheck can't bind a Run), from the repo's main checkout. To act by hand, run sf-tick: sf-act
-# without --lock takes no lock, so it can race a tick.
-# Usage: sf-act [--repo owner/repo] [--lock <dir>]
-#   --lock  sf-tick's host-wide lock dir: sf-act claims it by writing its pid there (only if no
-#           pid is there yet), and on exit removes it only while that pid is still its own.
+# sf-act: carry out sf-state's actions for one repo. The factory:foreman agent runs it from the
+# repo's main checkout, then carries out the requests it wrote (docs/decisions/t3-dispatch.md). It
+# takes no lock: the foreman's scheduled task never overlaps itself, so don't run it beside one.
+# Usage: sf-act [--repo owner/repo]
 #
 # Each pass reruns sf-state and acts on every action; passes repeat (at most 4) while the action
 # list changes, so a task created in one pass starts in the next, in the same fire.
 #
-# The Run DAG is built lazily. Worker tasks carry their brief as the task spec (worker-start
-# --task takes no other spec); inline tasks are steps sf-act does itself when they turn ready:
+# The Run DAG is built lazily. Worker tasks carry their brief as the task spec; inline tasks are steps sf-act does itself when they turn ready:
 #   start      attempt marker, run-create `factory O/R#N`, `intake` + inline `route`
 #   route      intake said go: plan_first -> `plan` + `post-plan`; else branch prep, `build` + `gate`
 #   post-plan  posts the plan body on the issue, then branch prep, `build` + `gate`
@@ -25,23 +22,23 @@
 # appends the text to the PR body and carries on, in any round (#53).
 # Round 2 tasks (after review findings or a verify FAIL in round 1) carry the suffix ` r2`.
 # Every inline step creates its children with deps on itself and checks for them first, so a
-# step that dies midway is redone without doubling anything. sf-act binds the Run (`run-use`)
-# before each change: binding is last-writer-wins.
+# step that dies midway is redone without doubling anything. sf-act binds the Run before each
+# change.
 #
 # A failed task is acted on in the same fire (station result contract, #7): hold with a reset ->
 # sf-hold; findings or FAIL in round 1 -> round 2; anything else -> sf-stop. sf-act marks a task
 # it gives up on `failed` with a `stop` result before calling sf-stop, so a failed sf-stop
 # leaves a dead Run that sf-state turns into the same stop next fire, never a new Run.
-# A build, review, verify or debrief agent that ended with outcome=failure and no report (Orca
-# raises no escalation) gets `retry` once (usage limit: hold), then a stop whose comment carries
+# A build, review, verify or debrief agent that ended with outcome=failure and no report (no
+# escalation names it) gets `retry` once (usage limit: hold), then a stop whose comment carries
 # its last output and how to rerun (#57).
 # An issue closed before its Run merged (no debrief or lessons task) gets `abandon`: its workers stopped, open tasks failed.
-# A stop or abandon closes the Run's terminals first (a stop keeps the worktree for triage); a
-# closed issue whose Run is over gets `cleanup`: its worktree and branch removed, never a dirty one.
+# A stop keeps the worktree for triage; a closed issue whose Run is over gets `cleanup`: its
+# worktree and merged branch removed, never a dirty one.
 #
 # A failure leaves one line, `<time> sf-act <repo>: <reason>`, in the file `act_log` names
-# (/tmp/factory-act-<uid>-<owner>-<repo>.log): the terminal closes on exit, so stderr is lost.
-# A run that ends clean removes the file. sf-tick reports a recent line.
+# (/tmp/factory-act-<uid>-<owner>-<repo>.log), so it outlives the fire's own output.
+# A run that ends clean removes the file.
 #
 # Exit 0: every action done. 1: an action failed (the next fire retries). 2: bad arguments.
 set -u
@@ -52,7 +49,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/lib/factory.sh"
 # shellcheck source=lib/orch.sh
 . "$root/lib/orch.sh"
-# The sibling sf-* scripts are found on PATH (sf-tick puts this bin dir first).
+# The sibling sf-* scripts are found on PATH, else next to this one.
 case ":$PATH:" in
   *":$root/bin:"*) ;;
   *) PATH=$PATH:$root/bin && export PATH ;;
@@ -73,12 +70,11 @@ die() {
   exit 1
 }
 
-repo='' lock=''
+repo=''
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || usage_error "$1 needs a value"
   case "$1" in
     --repo) repo=$2 ;;
-    --lock) lock=$2 ;;
     *) usage_error "unknown argument: $1" ;;
   esac
   shift 2
@@ -89,17 +85,10 @@ name=${repo#*/}
 main=$(pwd)
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-act.XXXXXX") || die "temp dir not created"
-if [ -n "$lock" ]; then
-  [ -d "$lock" ] || { rm -rf "$tmp"; die "lock $lock not held: sf-tick takes it before spawning sf-act"; }
-  # noclobber: a pid already there means another sf-act claimed it (this one started too late).
-  (set -C && echo $$ > "$lock/pid") 2> /dev/null || { rm -rf "$tmp"; die "lock $lock already claimed by pid $(cat "$lock/pid" 2> /dev/null)"; }
-  trap 'rm -rf "$tmp"; [ "$(cat "$lock/pid" 2> /dev/null)" != $$ ] || rm -rf "$lock"' EXIT
-else
-  trap 'rm -rf "$tmp"' EXIT
-fi
+trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' INT TERM HUP
 for g in gantry-gate-evidence gantry-verdict-check; do
-  command -v "$g" > /dev/null 2>&1 || die "$g not found on PATH (sf-act runs with sf-tick's PATH)"
+  command -v "$g" > /dev/null 2>&1 || die "$g not found on PATH (install gantry or add it to PATH)"
 done
 
 log() { echo "$me: $*" >&2; }
@@ -116,7 +105,7 @@ clip() { dd bs=400 count=1 2> /dev/null; }
 # Usage-limit wording from Claude Code and Codex.
 LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many requests|try again (at|in)'
 
-# ---- Orca -----------------------------------------------------------------------------------
+# ---- Runs and tasks -------------------------------------------------------------------------
 
 bind() { orch_run_bind "$1" > /dev/null 2> "$tmp/err" || { log "Run $1 not bound: $(first "$tmp/err")"; return 1; }; }
 
@@ -209,8 +198,8 @@ find_task() {
 }
 
 # create <run> <title> <deps json> [parent]: create the task (spec on stdin) unless a task with
-# this title and parent exists; print its id. Reloads the task list. No --display-name: Orca's
-# concise task-list shows it as `title`, and sf-state matches titles (ship, debrief, lessons).
+# this title and parent exists; print its id. Reloads the task list. sf-state matches
+# titles (ship, debrief, lessons).
 create() {
   id=$(find_task "$2" "${4:-}")
   if [ -n "$id" ]; then
@@ -231,7 +220,7 @@ done_with() { orch_task_complete "$1" "$2" > /dev/null 2> "$tmp/err" || { log "t
 failed_with() { orch_task_fail "$1" "$2" > /dev/null 2> "$tmp/err" || { log "task $1 not marked failed: $(first "$tmp/err")"; return 1; }; }
 
 # The task's result line JSON (`factory-result: {...}`, the body's last non-empty line), or
-# nothing. A worker's result is Orca's JSON report with a body; sf-act's own is plain text.
+# nothing. A worker's result is a JSON report with a body; sf-act's own is plain text.
 result_json() {
   # One jq: the body's last non-blank line (awk's NF: a line of only spaces and tabs is blank; CRLF read as LF), and the
   # JSON after its last `factory-result: `. A clean object comes back compact; anything else (text after the JSON, as
@@ -331,7 +320,7 @@ prep() {
     orch_worktree_create "$b" "$main" "$def" "$b" "$issue" > /dev/null 2> "$tmp/err" \
       || { log "worktree for $b not created: $(first "$tmp/err")"; return 1; }
     wt=$(branch_wt "$b")
-    [ -n "$wt" ] || { log "worktree for branch $b not found after orca worktree create"; return 1; }
+    [ -n "$wt" ] || { log "worktree for branch $b not found after it was created"; return 1; }
   fi
   if git -C "$main" show-ref --verify -q "refs/remotes/origin/$b"; then
     pr=$(open_pr "$b") || { log "open PRs for $b not listed"; return 1; }
@@ -360,7 +349,7 @@ stage() {
 }
 
 # post_timeline: the Run's last comment, once: each stamped stage with its time and the time since
-# the previous stamped stage, which holds that stage's run and any wait for the next sf-tick. Built
+# the previous stamped stage, which holds that stage's run and any wait for the next foreman fire. Built
 # only from the stamps above (UTC times sf-act wrote), never from text copied from GitHub.
 post_timeline() {
   pt_marks=$(markers_since_ready "$repo" "$issue") || { log "#$issue: timeline not posted: timeline not read"; return 0; }
@@ -380,7 +369,7 @@ post_timeline() {
     | .out[]' 2> /dev/null) || { log "#$issue: timeline not posted: stamps not read"; return 0; }
   strip_cr pt_lines
   [ -n "$pt_lines" ] || return 0
-  printf 'factory: run timeline (UTC). "+" is the time since the previous stage began: that stage'"'"'s run plus any wait for the next sf-tick.\n\n%s\n\n<!-- factory:{"kind":"timeline"} -->\n' "$pt_lines" | comment || return 0
+  printf 'factory: run timeline (UTC). "+" is the time since the previous stage began: that stage'"'"'s run plus any wait for the next foreman fire.\n\n%s\n\n<!-- factory:{"kind":"timeline"} -->\n' "$pt_lines" | comment || return 0
 }
 
 # ---- consult-shin (#36) ---------------------------------------------------------------------------
@@ -426,31 +415,9 @@ CONSULT
 
 # ---- giving up -------------------------------------------------------------------------------
 
-# close_terminals_of <worktree path>: close every live terminal in that worktree. Idempotent; a
-# failure is retried next fire.
-close_terminals_of() {
-  ct_w=$1
-  orch_terminal_list "$ct_w" > "$tmp/terms" 2> "$tmp/err" || { log "terminals of $ct_w not listed: $(first "$tmp/err")"; return 1; }
-  jq -er '.ok == true and (.result.terminals | type == "array") and all(.result.terminals[]; .handle | type == "string")' "$tmp/terms" > /dev/null 2>&1 || { log "terminals of $ct_w not listed: $(first "$tmp/terms")"; return 1; }
-  ct_h=$(jq -r '.result.terminals[].handle' "$tmp/terms" | tr -d '\r')
-  for ct_t in $ct_h; do
-    orch_terminal_close "$ct_t" > /dev/null 2> "$tmp/err" || { log "terminal $ct_t of $ct_w not closed: $(first "$tmp/err")"; return 1; }
-  done
-}
-# close_terminals: close every live terminal in the issue's worktrees (build and debrief branch),
-# never the main checkout's: sf-act itself runs in one.
-close_terminals() {
-  for ctt_b in "$(branch)" "$(debrief_branch)"; do
-    ctt_w=$(branch_wt "$ctt_b")
-    [ -n "$ctt_w" ] || continue
-    close_terminals_of "$ctt_w" || return 1
-  done
-}
-# stop_now <reason>: sf-stop, after the Run's terminals are closed. A stopped issue keeps its
-# worktree for triage, but no live worker.
+# stop_now <reason>: sf-stop. A stopped issue keeps its worktree for triage.
 # The PR (when the branch has one open) goes to sf-stop so the stop comment can say what it changes.
 stop_now() {
-  close_terminals || return 1
   sn_pr=$(open_pr "$(branch)" 2> /dev/null) || sn_pr=
   if [ -n "$sn_pr" ]; then sf-stop --repo "$repo" --pr "$sn_pr" "$issue" "$@"; else sf-stop --repo "$repo" "$issue" "$@"; fi
 }
@@ -480,16 +447,16 @@ limit_seen() {
   [ -n "$ld" ] || return 1
   orch_worker_read "$ld" 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
 }
-# last_output <dispatch>: the end of the worker's terminal on one line, for a stop comment.
+# last_output <dispatch>: the end of what the worker thread last said, on one line, for a stop comment.
 last_output() {
   orch_worker_read "$1" 2> /dev/null | tail -c 600 | tr -d '\r' | tr -s '\n\t ' ' ' | sed 's/^ //;s/ $//'
 }
 
 # ---- launching workers -------------------------------------------------------------------------
 
-# live_worker <task>: print the dispatch of the task's last worker unless Orca shows it gone
-# (no dispatch, dispatch_not_found, or liveness exited); print `unknown` when Orca can't say.
-# After an Orca restart a task can be ready again while its old worker session lives on (#7).
+# live_worker <task>: print the dispatch of the task's last worker unless it is gone (no dispatch,
+# dispatch_not_found, or liveness exited); print `unknown` when that can't be read.
+# A task can be ready again while its old worker thread lives on (#7).
 live_worker() {
   orch_dispatch_show "$1" > "$tmp/dispatch" 2> /dev/null || { echo unknown; return 0; }
   ld=$(jq -r 'if .ok == true then (.result.dispatch.id // "") else "?" end' "$tmp/dispatch" 2> /dev/null) || ld='?'
@@ -951,7 +918,7 @@ act_restart() {
   bind "$1" || return 1
   # The held worker may still sit at its usage limit: fence it so the restart is the only worker.
   if lw=$(live_worker "$2"); then
-    [ "$lw" != unknown ] || { log "held worker of task $2 not checked (Orca didn't answer); next fire retries"; return 1; }
+    [ "$lw" != unknown ] || { log "held worker of task $2 not checked (its state couldn't be read); next fire retries"; return 1; }
     orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "held worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   fi
   orch_task_ready "$2" > /dev/null 2> "$tmp/err" || { log "task $2 not set ready: $(first "$tmp/err")"; return 1; }
@@ -972,7 +939,7 @@ act_nudge() {
   # a marker that fails after the send would nudge again every fire.
   printf 'factory: nudged the %s worker, which stopped without reporting.\n\n<!-- factory:{"kind":"nudge","dispatch":"%s"} -->\n' "$title" "$d" | comment || return 1
   orch_worker_send "$d" "$run" "factory: report your result" \
-    "You ended your turn without worker_done. Finish the task in the foreground, then send worker_done with the factory-result line. If you can't finish, report status stop with the reason." \
+    "You ended your turn without a result. Finish the task in the foreground, then end your final message with the factory-result line. If you can't finish, report status stop with the reason." \
     > /dev/null 2> "$tmp/err" || { log "nudge not sent to $d: $(first "$tmp/err")"; return 1; }
 }
 
@@ -992,7 +959,7 @@ act_retry() {
   fi
   printf 'factory: the %s agent ended with outcome=failure and no report; running it again once.\n\n<!-- factory:{"kind":"retry","task":"%s"} -->\n' "$title" "$t" | comment || return 1
   if lw=$(live_worker "$t"); then
-    [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
+    [ "$lw" != unknown ] || { log "worker of task $t not checked (its state couldn't be read); next fire retries"; return 1; }
     orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   fi
   orch_task_ready "$t" > /dev/null 2> "$tmp/err" || { log "task $t not set ready: $(first "$tmp/err")"; return 1; }
@@ -1000,7 +967,7 @@ act_retry() {
 }
 
 # act_abandon <run> <reason>: the issue closed before merge: stop the Run's workers, then fail its
-# open tasks, so the Run is dead and frees its slot. A worker Orca can't account for is left for
+# open tasks, so the Run is dead and frees its slot. A worker whose state can't be read is left for
 # the next fire, so no worker outlives the abandon.
 act_abandon() {
   run=$1
@@ -1009,10 +976,9 @@ act_abandon() {
   open=$(jq -r '.result.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending") | .id' "$tmp/tasks.json" | tr -d '\r')
   for t in $open; do
     lw=$(live_worker "$t") || continue
-    [ "$lw" != unknown ] || { log "worker of task $t not checked (Orca didn't answer); next fire retries"; return 1; }
+    [ "$lw" != unknown ] || { log "worker of task $t not checked (its state couldn't be read); next fire retries"; return 1; }
     orch_worker_stop "$lw" > /dev/null 2> "$tmp/err" || { log "worker $lw not stopped: $(first "$tmp/err")"; return 1; }
   done
-  close_terminals || return 1
   for t in $open; do
     failed_with "$t" "factory-result: {\"station\":$(js "$(station_of "$(title_of "$t")")"),\"status\":\"stop\",\"reason\":$(js "$2")}" || return 1
   done
@@ -1021,10 +987,9 @@ act_abandon() {
 
 # common_dir <path>: the real path of the git dir the checkout at <path> shares (empty if unreadable).
 common_dir() { (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P) 2> /dev/null; }
-# act_cleanup <worktree path>: the issue is closed and its Run over: close its idle terminals (Orca
-# leaves `Setup` open), then remove the worktree and its branch. Never a worktree with uncommitted
-# changes: report its path and leave it. A path that is already gone from disk is still handed to
-# Orca, so a crash after git's removal converges.
+# act_cleanup <worktree path>: the issue is closed and its Run over: remove the worktree, and its
+# branch when merged. Never a worktree with uncommitted changes: report its path and leave it. A path
+# that is already gone from disk is still handed to the adapter, so a crash after git's removal converges.
 act_cleanup() {
   w=$1
   { [ -n "$w" ] && [ "$w" != "$main" ]; } || { log "#$issue: cleanup of worktree [$w] refused: not a factory worktree"; return 1; }
@@ -1034,7 +999,6 @@ act_cleanup() {
     { [ -n "$cd_w" ] && [ "$cd_w" = "$(common_dir "$main")" ]; } || { log "#$issue: cleanup of worktree $w refused: not a worktree of this repo"; return 1; }
     dirty=$(git -C "$w" status --porcelain 2> "$tmp/err") || { log "#$issue: worktree $w not checked for changes: $(first "$tmp/err")"; return 1; }
     [ -z "$dirty" ] || { log "#$issue: worktree $w has uncommitted changes; not removed"; return 1; }
-    close_terminals_of "$w" || return 1
   fi
   orch_worktree_rm "$w" > /dev/null 2> "$tmp/err" || { log "#$issue: worktree $w not removed: $(first "$tmp/err")"; return 1; }
   log "#$issue: removed worktree $w"

@@ -9,21 +9,20 @@ test_a_fresh_issue_gets_an_attempt_marker_then_one_run_with_intake_and_route() {
   world
   acts
   assert_eq 1 "$(runs_count)" "Runs"
-  assert_eq "factory acme/app#7" "$(sim '.runs[0].objective')" "objective"
+  assert_eq "factory acme/app#7" "$(t3_q '.runs[0].objective')" "objective"
   # The attempt marker is posted before the Run exists, so a crash between them still counts.
-  first_comment=$(grep -n '^gh issue comment 7' "$FAKE_LOG" | head -n 1 | cut -d: -f1)
-  run_create=$(grep -n '^orca orchestration run-create' "$FAKE_LOG" | cut -d: -f1)
-  [ "$first_comment" -lt "$run_create" ] || fail "attempt comment came after run-create"
+  attempt=$(grep -n -F '"kind":"attempt"' "$FAKE_LOG.stdin" | head -n 1 | cut -d: -f1)
+  run_create=$(grep -n -F '"kind":"run"' "$FAKE_LOG.stdin" | head -n 1 | cut -d: -f1)
+  [ "$attempt" -lt "$run_create" ] || fail "attempt comment came after the Run's"
   assert_contains "$(fake_stdin)" '<!-- factory:{"kind":"attempt"} -->'
   assert_eq dispatched "$(status_of intake)" "intake"
   assert_eq pending "$(status_of route)" "route"
   assert_eq claude/sonnet "$(agent_of intake)" "intake agent"
   assert_eq "factory-role: intake" "$(spec_of intake | head -n 1)" "intake spec line 1"
-  assert_eq "" "$(sim '.tasks[0].display')" "display name"
   # A second fire with the worker still busy does nothing.
   acts
   assert_eq 1 "$(runs_count)" "Runs after a second fire"
-  assert_eq 2 "$(sim '.tasks | length')" "tasks after a second fire"
+  assert_eq 2 "$(t3_q '.tasks | length')" "tasks after a second fire"
 }
 
 test_go_preps_a_fresh_branch_deletes_a_stale_remote_one_and_starts_build() {
@@ -38,7 +37,7 @@ test_go_preps_a_fresh_branch_deletes_a_stale_remote_one_and_starts_build() {
   assert_eq pending "$(status_of gate)" "gate"
   assert_eq claude/sonnet "$(agent_of build)" "build agent"
   assert_contains "$(worktree_of build)" "worktrees/app-7"
-  assert_eq "$(git rev-parse origin/main)" "$(git -C "$ORCA_SIM/worktrees/app-7" rev-parse HEAD)" "branch base"
+  assert_eq "$(git rev-parse origin/main)" "$(git -C "$(wt_path)" rev-parse HEAD)" "branch base"
   spec=$(spec_of build)
   assert_contains "$spec" "- Branch: app-7"
   assert_contains "$spec" "- Work type: feature"
@@ -55,7 +54,7 @@ test_plan_first_posts_the_plan_without_its_result_line_and_the_next_fire_builds(
   finish plan "$(printf '## Plan\n1. add greet\n2. test it\nfactory-result: {"station":"plan","status":"planned"}')"
   : > "$FAKE_LOG.stdin"
   acts
-  posted=$(fake_stdin)
+  posted=$(posted_of plan)
   assert_contains "$posted" "1. add greet"
   assert_contains "$posted" "\"kind\":\"plan\",\"task\":\"$(id_of plan)\""
   case "$posted" in *factory-result:*) fail "a factory-result line was posted: $posted" ;; esac
@@ -70,14 +69,14 @@ test_post_plan_redone_after_a_crash_posts_the_plan_once() {
   finish intake "$PLAN_FIRST"
   acts
   finish plan "$(printf 'the plan\nfactory-result: {"station":"plan","status":"planned"}')"
-  orca_fails create "worktree: disk full"
+  : > "$TEST_TMP/app.worktrees" # a file where the worktrees go: no worktree can be made
   act
   assert_eq 1 "$act_status" "sf-act exit status with worktree create failing"
   assert_eq ready "$(status_of post-plan)" "post-plan after the crash"
   assert_eq 1 "$(grep -c 'kind":"plan' "$FAKE_LOG.stdin")" "plan comments"
   m=$(jq -cn --arg t "$(id_of plan)" '{kind: "plan", task: $t}')
   timeline "[$READY_EVENT,$(marker_comment "$m" 2026-11-02T00:00:00Z)]"
-  orca_ok create
+  rm "$TEST_TMP/app.worktrees"
   acts
   assert_eq 1 "$(grep -c 'kind":"plan' "$FAKE_LOG.stdin")" "plan comments after the redo"
   assert_eq dispatched "$(status_of build)" "build"
@@ -98,12 +97,12 @@ test_a_step_that_dies_midway_is_redone_without_doubling_tasks() {
   world
   acts
   finish intake "$GO"
-  orca_fails_after task-create 1
+  comment_fails_after task 1
   act
   assert_eq 1 "$act_status" "sf-act exit status"
   assert_eq ready "$(status_of route)" "route after the crash"
   assert_eq none "$(status_of gate)" "gate after the crash"
-  orca_ok task-create
+  comment_ok task
   acts
   assert_eq 1 "$(count_titled build)" "build tasks"
   assert_eq 1 "$(count_titled gate)" "gate tasks"
@@ -151,14 +150,15 @@ test_review_without_codex_posts_not_run_and_verify_starts() {
   open_pr_seq app-7 '' 12
   fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
   fixture gh pr comment 12 -R "$REPO" --body-file - < /dev/null
-  orca_fails worker-start "codex: command not found"
+  # Only the review dispatch fails: build's result is already posted, review and verify start after it.
   finish build "$BUILT"
+  comment_fails dispatch "codex: command not found"
   act
-  orca_ok worker-start
+  comment_ok dispatch
   assert_contains "$(fake_stdin)" "factory: Codex review not run: codex: command not found"
   assert_eq completed "$(status_of review)" "review"
-  assert_contains "$(sim '[.tasks[] | select(.title == "review")][0].result')" '"status":"not-run"'
-  # verify turned ready; its start failed in the same fire (orca still failing), the next starts it.
+  assert_contains "$(result_of review)" '"status":"not-run"'
+  # verify turned ready; its start failed in the same fire (still failing), the next starts it.
   assert_eq ready "$(status_of verify)" "verify"
   acts
   assert_eq dispatched "$(status_of verify)" "verify"
@@ -170,8 +170,8 @@ test_review_at_a_codex_usage_limit_holds() {
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
   fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
-  orca_fails worker-start "You've hit your usage limit. Try again in 3 hours."
   finish build "$BUILT"
+  comment_fails dispatch "You've hit your usage limit. Try again in 3 hours."
   acts
   assert_eq failed "$(status_of review)" "review"
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 codex "
@@ -184,8 +184,8 @@ test_review_that_fails_to_start_otherwise_stops() {
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
   fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
-  orca_fails worker-start "socket closed"
   finish build "$BUILT"
+  comment_fails dispatch "socket closed"
   act
   assert_eq failed "$(status_of review)" "review"
   assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "Codex review worker not started: socket closed"
@@ -198,11 +198,11 @@ test_review_findings_rework_in_round_two_and_a_round_two_fail_stops() {
   finish review 'factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":2}' failed
   acts
   assert_eq completed "$(status_of review)" "review"
-  assert_contains "$(sim '[.tasks[] | select(.title == "review")][0].result')" '"status":"reworked"'
-  assert_eq completed "$(sim --arg v "$verify" '.tasks[] | select(.id == $v) | .status')" "round 1 verify"
+  assert_contains "$(result_of review)" '"status":"reworked"'
+  assert_eq completed "$(t3_q '.tasks[$v].status' --arg v "$verify")" "round 1 verify"
   # Leaves first: ship is superseded before verify, so verify never turns ready on the way.
-  s=$(grep -n "task-update --id $ship --status completed" "$FAKE_LOG" | cut -d: -f1)
-  v=$(grep -n "task-update --id $verify --status completed" "$FAKE_LOG" | cut -d: -f1)
+  s=$(status_line "$ship" completed)
+  v=$(status_line "$verify" completed)
   if [ -z "$s" ] || [ -z "$v" ] || [ "$s" -ge "$v" ]; then fail "superseded out of order (ship line $s, verify line $v)"; fi
   assert_eq dispatched "$(status_of 'build r2')" "build r2"
   assert_contains "$(spec_of 'build r2')" "- Round: 2 of 2"
@@ -223,8 +223,11 @@ test_worker_stopped_without_reporting_is_nudged_once_then_stopped() {
   acts
   escalation intake 2026-11-03T00:00:00Z
   acts
-  assert_eq "dispatch:$(dispatch_of intake)" "$(sim '.sent[0].to')" "nudge target"
+  assert_eq "$(dispatch_of intake)" "$(requests_of send | jq -r '.send.dispatch')" "nudge target"
   assert_contains "$(fake_stdin)" "\"kind\":\"nudge\",\"dispatch\":\"$(dispatch_of intake)\""
+  nudge=$(requests_of send | jq -r '.send.body' | tr -d '\r')
+  assert_contains "$nudge" "end your final message with the factory-result line"
+  case "$nudge" in *worker_done*) fail "the nudge asks for worker_done: $nudge" ;; esac
   assert_eq dispatched "$(status_of intake)" "intake after the nudge"
   m=$(jq -cn --arg d "$(dispatch_of intake)" '{kind: "nudge", dispatch: $d}')
   timeline "[$READY_EVENT,$(marker_comment "$m" 2026-11-03T00:01:00Z)]"
@@ -241,44 +244,36 @@ test_worker_stopped_without_reporting_is_nudged_once_then_stopped() {
   acts
   assert_eq 1 "$(runs_count)" "Runs"
   assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "again after a nudge"
-  assert_eq 1 "$(sim '.sent | length')" "nudges sent"
+  assert_eq 1 "$(requests_of send | wc -l | tr -d ' ')" "nudges sent"
 }
 
 test_a_worker_stopped_at_a_usage_limit_is_held_not_nudged() {
   world
   acts
-  printf 'Claude usage limit reached. Your limit will reset at 5pm.\n' > "$ORCA_SIM/terminal/$(dispatch_of intake)"
-  escalation intake 2026-11-03T00:00:00Z
+  escalation intake 2026-11-03T00:00:00Z 'Claude usage limit reached. Your limit will reset at 5pm.'
   acts
-  assert_eq 0 "$(sim '.sent | length')" "nudges sent"
+  assert_eq "" "$(requests_of send)" "nudges sent"
   assert_eq failed "$(status_of intake)" "intake"
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 claude "
 }
 
-# agent_ended <outcome>: the agent in app-7's worktree ended its turn with that outcome (a state
-# `worktree ps` shows), and the task is still dispatched.
-agent_ended() {
-  sim_set '.agents = [{worktree: ($st.worktrees[] | select(.branch == "app-7") | .path), state: "done", outcome: $o}]' --arg o "$1" --argjson st "$(cat "$ORCA_SIM/state.json")"
-}
 retry_marker_at() { timeline "[$READY_EVENT,$(marker_comment "$(jq -cn --arg t "$(id_of review)" '{kind: "retry", task: $t}')" "$1")]"; }
 
 test_a_station_agent_that_failed_without_reporting_is_retried_once_then_stopped() {
   world
   to_review
-  first=$(dispatch_of review)
-  printf 'Codex could not finish this response.\n' > "$ORCA_SIM/terminal/$first"
-  agent_ended failure
+  agent_ended failed 'Codex could not finish this response.'
   acts
   assert_contains "$(fake_stdin)" "\"kind\":\"retry\",\"task\":\"$(id_of review)\""
   assert_eq dispatched "$(status_of review)" "review after the retry"
-  assert_eq 2 "$(sim --arg t "$(id_of review)" '[.dispatches[] | select(.task == $t)] | length')" "review dispatches"
+  assert_eq 2 "$(dispatch_count "$(id_of review)")" "review dispatches"
   assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
   # The retried agent fails too: the retry marker is on the issue and past its grace.
   retry_marker_at 2026-11-03T00:00:00Z
-  printf 'Codex could not finish this response again.\n' > "$ORCA_SIM/terminal/$(dispatch_of review)"
+  agent_ended failed 'Codex could not finish this response again.'
   acts
   assert_eq failed "$(status_of review)" "review"
-  assert_eq 2 "$(sim --arg t "$(id_of review)" '[.dispatches[] | select(.task == $t)] | length')" "review dispatches after the stop"
+  assert_eq 2 "$(dispatch_count "$(id_of review)")" "review dispatches after the stop"
   stop=$(grep '^sf-stop' "$FAKE_LOG")
   assert_contains "$stop" "review agent ended with outcome=failure and no report, again after a retry"
   assert_contains "$stop" "Codex could not finish this response again."
@@ -288,8 +283,7 @@ test_a_station_agent_that_failed_without_reporting_is_retried_once_then_stopped(
 test_a_station_agent_that_failed_at_a_usage_limit_is_held_not_retried() {
   world
   to_review
-  printf 'Codex usage limit reached. Try again at Dec 15th.\n' > "$ORCA_SIM/terminal/$(dispatch_of review)"
-  agent_ended failure
+  agent_ended failed 'Codex usage limit reached. Try again at Dec 15th.'
   acts
   assert_eq failed "$(status_of review)" "review"
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 codex "
@@ -355,7 +349,7 @@ test_merged_pr_runs_debrief_on_a_fresh_branch_then_files_lessons() {
   acts
   assert_called "sf-ship --repo acme/app 7 12"
   assert_eq completed "$(status_of ship)" "ship"
-  assert_eq "MERGED abc123" "$(sim '[.tasks[] | select(.title == "ship")][0].result')" "ship result"
+  assert_eq "MERGED abc123" "$(result_of ship)" "ship result"
   assert_eq dispatched "$(status_of debrief)" "debrief"
   assert_eq claude/haiku "$(agent_of debrief)" "debrief agent"
   assert_contains "$(worktree_of debrief)" "worktrees/debrief-app-7"
@@ -386,7 +380,7 @@ test_ship_stop_fails_the_ship_task_and_a_rebase_queues_a_new_review() {
   echo 3 > "$TEST_TMP/sf-ship.exit"
   finish verify "$VERIFIED"
   acts
-  assert_eq completed "$(sim '[.tasks[] | select(.title == "ship")][0].status')" "first ship"
+  assert_eq completed "$(t3_q '[.tasks[] | select(.title == "ship")][0].status')" "first ship"
   assert_eq 2 "$(count_titled review)" "review tasks"
   assert_eq dispatched "$(status_of review)" "second review"
   finish review "$CLEAN"
@@ -399,18 +393,6 @@ test_ship_stop_fails_the_ship_task_and_a_rebase_queues_a_new_review() {
   assert_called "sf-stop --repo acme/app --pr 12 7 ship: checks failed"
 }
 
-test_lock_holds_the_pid_while_acting_and_is_removed_on_exit() {
-  world
-  mkdir "$TEST_TMP/lock"
-  printf '#!/bin/sh\ncat "%s/lock/pid" > "%s/pid-seen"\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$TEST_TMP" "$TEST_TMP" "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
-  status=0
-  sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" > /dev/null 2>&1 || status=$?
-  assert_eq 0 "$status" "sf-act exit status"
-  is_pid=$(cat "$TEST_TMP/pid-seen")
-  case "$is_pid" in '' | *[!0-9]*) fail "no pid in the lock: [$is_pid]" ;; esac
-  [ ! -e "$TEST_TMP/lock" ] || fail "lock not removed"
-}
-
 test_sf_state_failing_does_nothing() {
   world
   fixture gh issue list -R "$REPO" --state open --limit 1000 --json number,labels,body < /dev/null
@@ -420,9 +402,9 @@ test_sf_state_failing_does_nothing() {
   assert_eq 0 "$(runs_count 2> /dev/null || echo 0)" "Runs"
 }
 
-test_missing_gantry_gates_stop_before_acting_and_release_the_lock() {
+test_missing_gantry_gates_stop_before_acting() {
   world
-  mkdir "$TEST_TMP/lock" "$TEST_TMP/nogantry"
+  mkdir "$TEST_TMP/nogantry"
   for t in sh jq git dirname cat mktemp rm sed date; do ln -s "$(command -v "$t")" "$TEST_TMP/nogantry/$t"; done
   # PATH without the dirs holding a gantry gate, plus the tools above (in case their dir held
   # one). A bare symlink dir isn't enough on Windows: Git Bash tools need their DLLs on PATH.
@@ -431,76 +413,69 @@ test_missing_gantry_gates_stop_before_acting_and_release_the_lock() {
     [ -e "$d/gantry-gate-evidence" ] || [ -e "$d/gantry-verdict-check" ] || p=$p:$d
   done
   status=0
-  PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" 2> "$TEST_TMP/err" || status=$?
+  PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "gantry-gate-evidence not found on PATH"
-  # The reason is where a person looks, not only on the terminal that closes.
+  # The reason is where a person looks, not only in the thread that ends.
   assert_contains "$(cat "$FACTORY_ACT_LOG")" "sf-act acme/app: gantry-gate-evidence not found on PATH"
-  [ ! -e "$TEST_TMP/lock" ] || fail "lock kept"
   assert_eq 0 "$(count_calls 'gh ')" "gh calls"
 }
 
-# After an Orca restart a task can be ready again while its old worker session lives on (#7).
+# A task can be ready again while its old worker's thread lives on (#7).
 test_a_ready_task_whose_old_worker_lives_on_gets_no_second_worker() {
   world
   acts
-  d=$(dispatch_of intake)
-  sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end) | .tasks |= map(if .title == "intake" then .status = "ready" else . end)' --arg d "$d"
+  d=$(dispatch_of intake) t=$(id_of intake)
+  thread "$d" running
+  comment_as OWNER 7 "{\"kind\":\"status\",\"task\":\"$t\",\"status\":\"ready\"}"
   act
   assert_eq 1 "$act_status" "sf-act exit status (the next fire retries)"
-  assert_eq 1 "$(sim '[.dispatches[] | select(.task == $t)] | length' --arg t "$(id_of intake)")" "intake dispatches while the old worker lives"
+  assert_eq 1 "$(dispatch_count "$t")" "intake dispatches while the old worker lives"
   assert_contains "$(cat "$TEST_TMP/err")" "its last worker ($d) has not exited"
-  sim_set '.dispatches |= map(if .id == $d then .liveness = "exited" else . end)' --arg d "$d"
+  thread "$d" completed
   acts
-  assert_eq 2 "$(sim '[.dispatches[] | select(.task == $t)] | length' --arg t "$(id_of intake)")" "intake dispatches once it exited"
+  assert_eq 2 "$(dispatch_count "$t")" "intake dispatches once it exited"
 }
 
 test_a_restart_after_a_hold_fences_the_held_worker_first() {
   world
   acts
-  d=$(dispatch_of intake)
-  finish intake 'factory-result: {"station":"intake","status":"hold","provider":"claude","reset":"2026-11-01T01:00:00Z","reason":"limit"}' failed
-  sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end)' --arg d "$d"
+  d=$(dispatch_of intake) t=$(id_of intake)
+  # Held at a usage limit with no result posted: only the thread says whether the worker is gone.
+  escalation intake 2026-11-01T00:10:00Z 'Claude usage limit reached. Your limit will reset at 5pm.'
   acts
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" "sf-hold --repo acme/app 7 claude "
   m='{"kind":"hold","provider":"claude","reset":"2026-11-01T01:00:00Z"}'
   timeline "[$READY_EVENT,$(marker_comment "$m" 2026-11-01T00:30:00Z)]"
+  thread "$d" running
+  : > "$REQUESTS"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status while the held worker lives"
+  assert_eq "$d" "$(requests_of stop | jq -r '.stop.dispatch')" "held worker's stop request"
+  assert_eq 1 "$(dispatch_count "$t")" "intake dispatches while the held worker lives"
+  thread "$d" interrupted
   acts
-  assert_eq true "$(sim '.dispatches[] | select(.id == $d) | .stopped' --arg d "$d")" "held worker stopped"
   assert_eq dispatched "$(status_of intake)" "intake after the restart"
-  assert_eq 2 "$(sim '[.dispatches[] | select(.task == $t)] | length' --arg t "$(id_of intake)")" "intake dispatches"
-}
-
-test_a_lock_claimed_by_another_sf_act_is_left_alone() {
-  world
-  mkdir "$TEST_TMP/lock"
-  echo 999999 > "$TEST_TMP/lock/pid"
-  status=0
-  sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" > /dev/null 2> "$TEST_TMP/err" || status=$?
-  assert_eq 1 "$status" "sf-act exit status"
-  assert_contains "$(cat "$TEST_TMP/err")" "already claimed by pid 999999"
-  assert_eq 999999 "$(cat "$TEST_TMP/lock/pid")" "pid in the lock"
-  assert_eq 0 "$(runs_count 2> /dev/null || echo 0)" "Runs"
-}
-
-test_a_lock_taken_over_while_acting_is_not_removed_on_exit() {
-  world
-  mkdir "$TEST_TMP/lock"
-  # A takeover mid-fire: another holder's pid replaces this sf-act's.
-  printf '#!/bin/sh\necho 999999 > "%s/lock/pid"\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$TEST_TMP" "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
-  sh "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" --lock "$TEST_TMP/lock" > /dev/null 2>&1 || :
-  [ -d "$TEST_TMP/lock" ] || fail "the new holder's lock was removed"
-  assert_eq 999999 "$(cat "$TEST_TMP/lock/pid")" "pid in the lock"
+  assert_eq 2 "$(dispatch_count "$t")" "intake dispatches"
 }
 
 # sf-act reads a Run's tasks whole: a stray document before the real one is a failed read, as in sf-state.
+# A copy of the plugin whose orch_task_list_full prints that stray document first.
 test_a_task_list_with_a_second_document_is_not_trusted() {
   world
   acts
   finish intake "$GO"
-  printf '#!/bin/sh\ncase " $* " in *" task-list "*" --full "*) echo '"'"'{"ok":false}'"'"' ;; esac\nexec sh "%s/test/fakes/orca-sim" "$@"\n' "$FACTORY_ROOT" > "$TEST_TMP/bin/orca"
-  act
-  assert_eq 1 "$act_status" "sf-act exit status"
+  mkdir -p "$TEST_TMP/plugin"
+  cp -R "$FACTORY_ROOT/bin" "$FACTORY_ROOT/lib" "$TEST_TMP/plugin/"
+  cat >> "$TEST_TMP/plugin/lib/orch-t3.sh" <<'SH'
+orch_task_list_full() { echo '{"ok":false}'; echo '{"ok":true,"result":{"tasks":[]}}'; }
+SH
+  : > "$REQUESTS"
+  status=0
+  FACTORY_T3_REQUESTS=$REQUESTS sh "$TEST_TMP/plugin/bin/sf-act" --repo "$REPO" > "$TEST_TMP/out" 2> "$TEST_TMP/err" || status=$?
+  assert_eq 1 "$status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "not listed: task-list printed no task array"
+  assert_eq "" "$(requests_of dispatch)" "workers"
 }
 
 # Seen in the e2e: a worker ends its body's only line with the result instead of a line of its own.
@@ -513,25 +488,21 @@ test_a_result_at_the_end_of_the_last_line_counts_and_is_never_posted() {
   finish plan "$(printf '## Plan\n1. add greet, then test it. factory-result: {"station":"plan","status":"planned"}')"
   : > "$FAKE_LOG.stdin"
   acts
-  posted=$(fake_stdin)
+  posted=$(posted_of plan)
   assert_contains "$posted" "1. add greet, then test it."
   case "$posted" in *factory-result*) fail "a factory-result line was posted: $posted" ;; esac
   assert_eq dispatched "$(status_of build)" "build after the plan"
 }
 
-test_an_orca_read_failure_never_counts_as_the_old_worker_gone() {
-  for cmd in dispatch-show worker-show; do
-    world
-    acts
-    d=$(dispatch_of intake)
-    sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end) | .tasks |= map(if .title == "intake" then .status = "ready" else . end)' --arg d "$d"
-    orca_fails "$cmd"
-    act
-    assert_eq 1 "$act_status" "sf-act exit status with $cmd failing"
-    assert_eq 1 "$(sim '[.dispatches[] | select(.task == $t)] | length' --arg t "$(id_of intake)")" "intake dispatches with $cmd failing"
-    orca_ok "$cmd"
-    rm -rf "${TEST_TMP:?}"/* 2> /dev/null
-  done
+test_a_thread_the_snapshot_lacks_never_counts_as_the_old_worker_gone() {
+  world
+  acts
+  t=$(id_of intake)
+  comment_as OWNER 7 "{\"kind\":\"status\",\"task\":\"$t\",\"status\":\"ready\"}"
+  act
+  assert_eq 1 "$act_status" "sf-act exit status with the worker's state unreadable"
+  assert_contains "$(cat "$TEST_TMP/err")" "intake worker not started: its last worker (unknown) has not exited"
+  assert_eq 1 "$(dispatch_count "$t")" "intake dispatches with the worker's state unreadable"
 }
 
 # Interrogate findings (#7): every result a worker reports is checked before anything builds on it.
@@ -573,12 +544,13 @@ test_a_nudge_whose_marker_fails_is_never_sent_twice() {
   world
   acts
   escalation intake 2026-11-03T00:00:00Z
-  fixture gh issue comment 7 -R "$REPO" --body-file - < /dev/null
-  fixture_exit 1 "gh: HTTP 502"
+  comment_fails nudge
+  : > "$REQUESTS"
   act
   act
   act
-  [ "$(sim '.sent | length')" -le 1 ] || fail "nudges sent: $(sim '.sent | length')"
+  sent=$(requests_of send | wc -l | tr -d ' ')
+  [ "$sent" -le 1 ] || fail "nudges sent: $sent"
 }
 
 test_a_merge_completes_ship_even_when_the_debrief_cannot_be_queued() {
@@ -590,7 +562,7 @@ test_a_merge_completes_ship_even_when_the_debrief_cannot_be_queued() {
   open_pr app-7 12
   echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
   finish verify "$VERIFIED"
-  orca_fails task-create "orca: down"
+  comment_fails task
   act
   assert_eq completed "$(status_of ship)" "ship"
   assert_contains "$(cat "$TEST_TMP/err")" "no debrief: not queued after the merge"
@@ -613,17 +585,17 @@ test_a_ship_left_ready_after_the_merge_completes_on_the_next_fire() {
   to_ship
   echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
   finish verify "$VERIFIED"
-  orca_fails task-update "orca: down"
+  comment_fails status
   act
   assert_eq ready "$(status_of ship)" "ship after the failed fire"
-  orca_ok task-update
+  comment_ok status
   rm "$TEST_TMP/sf-ship.out"
   issues '[]'
   echo 12 | fixture gh pr list -R "$REPO" --head app-7 --state merged --json number,isCrossRepository -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
   acts
   assert_eq 1 "$(count_calls sf-ship)" "sf-ship calls"
   assert_eq completed "$(status_of ship)" "ship"
-  assert_contains "$(sim '[.tasks[] | select(.title == "ship")][0].result')" "merged (PR #12) by an earlier fire"
+  assert_contains "$(result_of ship)" "merged (PR #12) by an earlier fire"
   assert_eq dispatched "$(status_of debrief)" "debrief"
 }
 
@@ -633,9 +605,9 @@ test_a_merge_found_by_a_later_fire_is_stamped() {
   to_ship
   echo "MERGED abc123" > "$TEST_TMP/sf-ship.out"
   finish verify "$VERIFIED"
-  orca_fails task-update "orca: down"
+  comment_fails status
   act
-  orca_ok task-update
+  comment_ok status
   rm "$TEST_TMP/sf-ship.out"
   issues '[]'
   echo 12 | fixture gh pr list -R "$REPO" --head app-7 --state merged --json number,isCrossRepository -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
@@ -661,13 +633,14 @@ test_a_ship_left_ready_on_an_issue_closed_without_a_merge_completes_without_a_de
 test_an_issue_closed_mid_run_abandons_the_run() {
   world
   to_build
-  sim_set '.dispatches |= map(if .id == $d then .liveness = "alive" else . end)' --arg d "$(dispatch_of build)"
+  thread "$(dispatch_of build)" running
   issues '[]'
+  : > "$REQUESTS"
   acts
   assert_eq failed "$(status_of build)" "build"
-  assert_eq true "$(sim --arg d "$(dispatch_of build)" '.dispatches[] | select(.id == $d) | .stopped // false')" "build worker stopped"
-  assert_eq 0 "$(sim '[.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending")] | length')" "open tasks"
-  assert_contains "$(sim '[.tasks[] | select(.title == "build")][0].result')" '"status":"stop"'
+  assert_eq "$(dispatch_of build)" "$(requests_of stop | jq -r '.stop.dispatch')" "build worker's stop request"
+  assert_eq 0 "$(t3_q '[.tasks[] | select(.status == "ready" or .status == "dispatched" or .status == "pending")] | length')" "open tasks"
+  assert_contains "$(result_of build)" '"status":"stop"'
   assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
   assert_eq '[]' "$(sh "$FACTORY_ROOT/bin/sf-state" "$REPO" | jq -c .)" "actions after the abandon"
 }
@@ -714,7 +687,7 @@ bad_model_line() {
   act
   assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[$1]"
   assert_eq failed "$(status_of intake)" "intake"
-  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+  assert_eq "" "$(requests_of dispatch)" "workers"
 }
 test_a_factory_model_line_without_a_slash_stops() { bad_model_line 'factory-model.build: opus'; }
 test_a_factory_model_line_for_an_unknown_station_stops() { bad_model_line 'factory-model.deploy: claude/opus'; }
@@ -735,8 +708,8 @@ test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
   fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
-  orca_fails worker-start "claude: not logged in"
   finish build "$BUILT"
+  comment_fails dispatch "claude: not logged in"
   act
   assert_eq ready "$(status_of review)" "review"
   assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
@@ -745,7 +718,7 @@ test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run
 test_a_hold_names_the_provider_the_worker_was_launched_on() {
   world
   claude_md "$(printf 'factory-model.intake: codex/gpt')"
-  orca_fails worker-start "codex usage limit reached"
+  comment_fails dispatch "codex usage limit reached"
   act
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " codex "
 }
@@ -755,7 +728,7 @@ test_a_malformed_factory_sensitive_line_stops_naming_the_line() {
   claude_md "$(printf 'factory-sensitive: true # PDPA')"
   act
   assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "[factory-sensitive: true # PDPA]"
-  assert_eq 0 "$(count_calls 'orca orchestration worker-start')" "workers"
+  assert_eq "" "$(requests_of dispatch)" "workers"
 }
 
 test_a_bulleted_factory_sensitive_line_stops() { bad_model_line '- factory-sensitive: true'; }
@@ -798,13 +771,8 @@ test_an_unreachable_origin_retries_next_fire_instead_of_stopping() {
 
 # ---- cleanup -------------------------------------------------------------------------------------
 
-# wt_path: the issue's build worktree, spelled as the sim reports it (Windows spells paths
-# C:/x or /c/x depending on which tool asks, so never recompute it).
-wt_path() { sim '.worktrees[] | select(.branch == "app-7") | .path' | tr -d '\r'; }
-# worker_terminal <handle> [path]: a live terminal in the worktree (default: the build worktree).
-worker_terminal() { sim_set '.terminals += [{handle: $h, worktree: "path:\($w)", title: "worker"}]' --arg h "$1" --arg w "${2:-$(wt_path)}"; }
-# A Run that shipped: every task completed, issue closed.
-run_done() { sim_set '.tasks |= map(.status = "completed")'; issues '[]'; }
+# cleanups: how many cleanup requests the foreman got.
+cleanups() { requests_of cleanup | wc -l | tr -d ' '; }
 
 test_a_merged_runs_worktree_and_branch_are_removed_and_a_second_fire_does_nothing() {
   world
@@ -812,46 +780,12 @@ test_a_merged_runs_worktree_and_branch_are_removed_and_a_second_fire_does_nothin
   w=$(wt_path)
   run_done
   acts
-  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  assert_eq "$w" "$(requests_of cleanup | jq -r '.cleanup.worktree')" "cleanup request"
   [ ! -d "$w" ] || fail "worktree still on disk"
   if git -C "$TEST_TMP/app" show-ref --verify -q refs/heads/app-7; then fail "branch app-7 still exists"; fi
-  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls"
+  assert_eq 1 "$(cleanups)" "cleanups"
   acts
-  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls after a second fire"
-}
-
-test_a_merged_runs_idle_terminals_are_closed_so_its_worktree_is_removed_with_no_manual_step() {
-  world
-  to_build
-  w=$(wt_path)
-  worker_terminal term_setup
-  worker_terminal term_shell
-  worker_terminal term_main "$TEST_TMP/app"
-  run_done
-  acts
-  assert_called "orca terminal close --terminal term_setup --json"
-  assert_called "orca terminal close --terminal term_shell --json"
-  assert_not_called "orca terminal close --terminal term_main --json"
-  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
-  closed=$(grep -n '^orca terminal close' "$FAKE_LOG" | tail -n 1 | cut -d: -f1)
-  removed=$(grep -n '^orca worktree rm' "$FAKE_LOG" | head -n 1 | cut -d: -f1)
-  [ "$closed" -lt "$removed" ] || fail "worktree removed before its terminals were closed"
-}
-
-test_a_cleanup_whose_terminals_cannot_be_closed_keeps_the_worktree_and_the_next_fire_retries() {
-  world
-  to_build
-  w=$(wt_path)
-  worker_terminal term_setup
-  run_done
-  orca_fails close "orca: terminal busy"
-  act
-  assert_eq 1 "$act_status" "sf-act exit status"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
-  [ -d "$w" ] || fail "worktree removed with its terminal still open"
-  orca_ok close
-  acts
-  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  assert_eq 1 "$(cleanups)" "cleanups after a second fire"
 }
 
 test_a_worktree_with_uncommitted_changes_is_never_removed_and_its_path_is_reported() {
@@ -863,16 +797,16 @@ test_a_worktree_with_uncommitted_changes_is_never_removed_and_its_path_is_report
   act
   assert_eq 1 "$act_status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "$w has uncommitted changes" "stderr"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  assert_eq 0 "$(cleanups)" "cleanups"
   [ -d "$w" ] || fail "dirty worktree removed"
   rm "$w/notes.txt"
   echo more >> "$w/CLAUDE.md"
   act
   assert_eq 1 "$act_status" "exit status with a modified tracked file"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls after a tracked edit"
+  assert_eq 0 "$(cleanups)" "cleanups after a tracked edit"
   git -C "$w" checkout -q CLAUDE.md
   acts
-  assert_eq 1 "$(count_calls 'orca worktree rm')" "rm calls once clean"
+  assert_eq 1 "$(cleanups)" "cleanups once clean"
 }
 
 test_a_same_named_worktree_of_another_repo_is_never_removed() {
@@ -885,7 +819,7 @@ test_a_same_named_worktree_of_another_repo_is_never_removed() {
   act
   assert_eq 1 "$act_status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "not a worktree of this repo" "stderr"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  assert_eq 0 "$(cleanups)" "cleanups"
   [ -d "$w" ] || fail "foreign worktree removed"
 }
 
@@ -897,75 +831,34 @@ test_a_worktree_whose_state_cannot_be_read_is_never_removed() {
   rm -rf "$w/.git"
   act
   assert_eq 1 "$act_status" "sf-act exit status"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  assert_eq 0 "$(cleanups)" "cleanups"
 }
 
-test_a_stop_closes_the_runs_terminals_first_and_keeps_the_worktree() {
+test_a_stop_calls_sf_stop_and_keeps_the_worktree() {
   world
   to_build
   w=$(wt_path)
-  worker_terminal term_a
-  worker_terminal term_b
-  worker_terminal term_main "$TEST_TMP/app"
   finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
   acts
-  assert_called "orca terminal close --terminal term_a --json"
-  assert_called "orca terminal close --terminal term_b --json"
-  assert_not_called "orca terminal close --terminal term_main --json"
-  assert_eq term_main "$(sim '[.terminals[].handle] | join(",")')" "terminals left"
   assert_called "sf-stop --repo acme/app 7 build: cannot build"
-  closed=$(grep -n '^orca terminal close' "$FAKE_LOG" | tail -n 1 | cut -d: -f1)
-  stopped=$(grep -n '^sf-stop' "$FAKE_LOG" | head -n 1 | cut -d: -f1)
-  [ "$closed" -lt "$stopped" ] || fail "sf-stop ran before the terminals were closed"
-  assert_eq 0 "$(count_calls 'orca worktree rm')" "rm calls"
+  assert_eq 0 "$(cleanups)" "cleanups"
   [ -d "$w" ] || fail "stopped Run's worktree removed"
 }
 
-test_a_stop_whose_terminals_cannot_be_closed_is_not_recorded_so_the_next_fire_retries() {
-  world
-  to_build
-  worker_terminal term_a
-  finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
-  orca_fails close "orca: terminal busy"
-  act
-  assert_eq 1 "$act_status" "sf-act exit status"
-  assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls"
-  orca_ok close
-  acts
-  assert_called "sf-stop --repo acme/app 7 build: cannot build"
-  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
-}
-
-test_a_terminal_list_that_is_not_a_list_stops_the_stop_and_the_next_fire_retries() {
-  world
-  to_build
-  worker_terminal term_a
-  finish build 'factory-result: {"station":"build","status":"stop","reason":"cannot build"}' failed
-  for bad in 'not json at all' '{"ok":false,"error":{"code":"x"}}' '{"ok":true,"result":{}}'; do
-    printf '%s\n' "$bad" > "$ORCA_SIM/fail/list.out"
-    act
-    assert_eq 1 "$act_status" "sf-act exit status on [$bad]"
-    assert_eq 0 "$(count_calls sf-stop)" "sf-stop calls on [$bad]"
-    assert_eq 1 "$(sim '.terminals | length')" "terminals left on [$bad]"
-  done
-  rm -f "$ORCA_SIM/fail/list.out"
-  acts
-  assert_called "sf-stop --repo acme/app 7 build: cannot build"
-  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
-}
-
-test_an_abandoned_runs_terminals_are_closed_so_its_worktree_can_be_cleaned_up() {
+test_an_abandoned_runs_worktree_is_cleaned_up() {
   world
   to_build
   w=$(wt_path)
-  worker_terminal term_a
+  thread "$(dispatch_of build)" completed
   issues '[]'
   acts
-  assert_eq 0 "$(sim '.terminals | length')" "terminals left"
-  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  # The abandon fire may leave the removal to the next one.
+  acts
+  assert_eq "$w" "$(requests_of cleanup | jq -r '.cleanup.worktree')" "cleanup request"
+  [ ! -d "$w" ] || fail "abandoned Run's worktree still on disk"
 }
 
-test_unpushed_commits_survive_a_cleanup_because_orca_keeps_an_unmerged_branch() {
+test_unpushed_commits_survive_a_cleanup_because_an_unmerged_branch_is_kept() {
   world
   to_build
   w=$(wt_path)
@@ -988,10 +881,10 @@ test_a_body_only_review_finding_appends_to_the_pr_body_and_the_run_continues_eve
   finish review "$body_only" failed
   acts
   assert_contains "$(fake_stdin)" 'scripts/check: ok'
-  assert_contains "$(sim '[.tasks[] | select(.title == "review")][0].result')" '"status":"body-fixed"'
+  assert_contains "$(result_of review)" '"status":"body-fixed"'
   assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
   assert_eq 0 "$(count_titled 'build r2')" "build r2 tasks"
-  assert_eq dispatched "$(sim --arg v "$verify" '.tasks[] | select(.id == $v) | .status')" "verify"
+  assert_eq dispatched "$(t3_q '.tasks[$v].status' --arg v "$verify")" "verify"
 }
 
 test_a_round_two_body_only_finding_does_not_stop_the_run() {
@@ -1007,7 +900,7 @@ test_a_round_two_body_only_finding_does_not_stop_the_run() {
   finish 'review r2' 'factory-result: {"station":"review","status":"findings","head_sha":"abc","comment_url":"u","findings":1,"body_only":true,"body_append":"## Mapping\nm"}' failed
   acts
   assert_eq 0 "$(count_calls 'sf-stop')" "sf-stop calls"
-  assert_contains "$(sim '[.tasks[] | select(.title == "review r2")][0].result')" '"status":"body-fixed"'
+  assert_contains "$(result_of 'review r2')" '"status":"body-fixed"'
   assert_eq dispatched "$(status_of 'verify r2')" "verify r2"
 }
 
@@ -1111,7 +1004,8 @@ test_cleanup_is_stamped_once_the_worktree_is_gone() {
   run_done
   : > "$FAKE_LOG.stdin"
   acts
-  assert_called "orca worktree rm --worktree path:$w --delete-branch --json"
+  assert_eq "$w" "$(requests_of cleanup | jq -r '.cleanup.worktree')" "cleanup request"
+  [ ! -d "$w" ] || fail "worktree still on disk"
   assert_contains "$(fake_stdin)" "$(stage_marker cleanup 2026-11-19T02:00:00Z)"
 }
 
@@ -1138,7 +1032,7 @@ test_a_consult_line_in_a_worker_result_is_posted_defused_and_labels_the_issue() 
   verify_with_consult
   assert_called "gh label create consult-shin -R $REPO --force --description factory: a station made a call for the owner; ship holds until the label is removed --color FBCA04"
   assert_called "gh issue edit 7 -R $REPO --add-label consult-shin"
-  posted=$(fake_stdin)
+  posted=$(posted_of consult)
   assert_eq 1 "$(printf '%s\n' "$posted" | grep -c '"kind":"consult"')" "consult comments posted"
   assert_contains "$posted" "factory: consult-shin (provisional). The verify station made this call"
   assert_contains "$posted" "- **Question:** Which table?"

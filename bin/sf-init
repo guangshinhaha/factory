@@ -3,7 +3,7 @@
 # first and changes only what is missing.
 # Usage: sf-init [--repo owner/repo] [--workspace <path>]
 #   --repo       the GitHub repo (default: the current directory's repo)
-#   --workspace  the repo's main checkout, where the automation runs (default: the main worktree
+#   --workspace  the repo's main checkout, where the foreman runs (default: the main worktree
 #                of the current directory's git repo). Its `origin` must be the repo on github.com.
 #
 # Steps, in order:
@@ -15,15 +15,12 @@
 #     value. Missing lines go on branch `factory-init` in a temporary worktree and open a PR;
 #     an open PR from this repo's `factory-init` (not a fork's) means it waits for that PR.
 #     Never pushes the default branch, and runs none of the repo's git hooks (see below).
-#  3. Orca automation `factory-<owner>/<repo>` (cron every 5 min, claude, prompt /factory:foreman,
-#     precheck an absolute-path sf-tick with this PATH, in the workspace): created unless one with that name exists.
-#     With FACTORY_ORCH=t3 there is no Orca: a shell can't call T3's tools, so sf-init prints the exact
+#  3. The foreman's schedule: a shell can't call T3's tools, so sf-init prints the exact
 #     `schedule_task` call that schedules the foreman (title factory-<owner>/<repo>, every 5 min,
 #     prompt running factory:foreman) for the agent to make, and ends `foreman: not scheduled`.
 #
-# Before any write it checks that gantry's gates resolve on this PATH, the one the automation's
-# precheck is given (Orca's own PATH has neither gantry nor the plugin's bin/), and fails naming
-# the missing command.
+# Before any write it checks that gantry's gates, which sf-act runs, resolve on this PATH, and
+# fails naming the missing command.
 #
 # Exit 0: everything is set up, or waits only on the factory-init PR. 1: a step failed; run it
 # again. 2: bad arguments, or jq missing.
@@ -33,8 +30,6 @@ me=sf-init
 # shellcheck source=lib/factory.sh
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/lib/factory.sh"
-# shellcheck source=lib/orch.sh
-. "$root/lib/orch.sh"
 
 repo=
 ws=
@@ -54,11 +49,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 need_jq
-for c in sf-tick sf-act; do
-  [ -r "$root/bin/$c" ] || die "$c not found next to sf-init"
-done
+[ -r "$root/bin/sf-act" ] || die "sf-act not found next to sf-init"
 for c in gantry-gate-evidence gantry-verdict-check; do
-  command -v "$c" > /dev/null 2>&1 || die "$c not found on PATH (the automation runs sf-tick with this PATH; install gantry or add it to PATH)"
+  command -v "$c" > /dev/null 2>&1 || die "$c not found on PATH (sf-act runs it; install gantry or add it to PATH)"
 done
 repo=$(resolve_repo "$repo") || exit 2
 branch=factory-init
@@ -68,7 +61,7 @@ if [ -z "$ws" ]; then
   [ -n "$ws" ] || usage_error "no git repo at the current directory, and no --workspace"
 fi
 [ -d "$ws" ] || usage_error "workspace [$ws] is not a directory"
-# git's own form of the path (C:/... on Windows), which native tools like orca read too.
+# git's own form of the path (C:/... on Windows), which native tools read too.
 ws=$(git -C "$ws" rev-parse --show-toplevel 2> /dev/null) || usage_error "workspace [$ws] is not a git checkout"
 # Every origin URL must be github.com/<repo>: git push uses the push URLs when any are set, and
 # pushes to each of them. GitHub names ignore case.
@@ -148,7 +141,7 @@ trap 'exit 1' HUP INT TERM
 # so they would fail every run. The only commit is the factory lines written here, and it lands
 # through a PR, where the repo's CI is the gate. So sf-init's git writes run with no hooks, and
 # without core.fsmonitor, a program from the repo's config that runs like one. The commit is also
-# unsigned: a headless Orca run has no signing agent, so commit.gpgSign=true would fail it. Clean and
+# unsigned: a headless agent run has no signing agent, so commit.gpgSign=true would fail it. Clean and
 # smudge filters (LFS) stay on: they can matter for correctness, and no failure shows they must go.
 nohooks=$tmp/no-hooks
 mkdir "$nohooks" || die "temp dir not created"
@@ -237,34 +230,12 @@ else
   fi
 fi
 
-# 3. The foreman's schedule.
+# 3. The foreman's schedule. Only an agent can call schedule_task (and list_scheduled_tasks to see
+# whether it exists).
 auto=factory-$repo
-if [ "${FACTORY_ORCH:-orca}" = t3 ]; then
-  # Only an agent can call schedule_task (and list_scheduled_tasks to see whether it exists).
-  # shellcheck disable=SC2016 # jq program in single quotes
-  call=$(jq_lf -cn --arg t "$auto" --arg p "Run the factory foreman for $repo: invoke the factory:foreman skill with the argument $repo, in the repo's main checkout at $ws." \
-    '{title: $t, prompt: $p, schedule: {type: "interval", everyMs: 300000}, bindToCurrentThread: false, freshSession: true}')
-  echo "$me: foreman: not scheduled (T3 scheduled tasks can only be made by an agent)"
-  echo "$me: if list_scheduled_tasks has no task titled $auto, call schedule_task with: $call"
-  echo "$me: $repo set up except the foreman schedule"
-  exit 0
-fi
-orch_automation_list > "$tmp/autos" || die "Orca automations not listed (orca automations list failed)"
-found=$(jq -r --arg n "$auto" '
-  .result | if type == "object" and (.automations | type) == "array" then .automations else error("no automations") end
-  | any(.[]; .name == $n)' "$tmp/autos" 2> /dev/null) \
-  || die "Orca automations list unreadable (no .result.automations array)"
-found=${found%"$cr"}
-if [ "$found" = true ]; then
-  echo "$me: automation $auto exists"
-else
-  case "$root$PATH" in
-    *"'"*) usage_error "a path or PATH holds a single quote: $root" ;;
-  esac
-  # Orca runs the precheck with its own PATH: set this one, and call sf-tick by path.
-  precheck="PATH='$PATH' sh '$root/bin/sf-tick'"
-  orch_automation_create "$auto" '*/5 * * * *' /factory:foreman "$precheck" "$ws" > /dev/null \
-    || die "automation $auto missing (orca automations create failed)"
-  echo "$me: created automation $auto"
-fi
-echo "$me: $repo set up"
+# shellcheck disable=SC2016 # jq program in single quotes
+call=$(jq_lf -cn --arg t "$auto" --arg p "Run the factory foreman for $repo: invoke the factory:foreman skill with the argument $repo, in the repo's main checkout at $ws." \
+  '{title: $t, prompt: $p, schedule: {type: "interval", everyMs: 300000}, bindToCurrentThread: false, freshSession: true}')
+echo "$me: foreman: not scheduled (T3 scheduled tasks can only be made by an agent)"
+echo "$me: if list_scheduled_tasks has no task titled $auto, call schedule_task with: $call"
+echo "$me: $repo set up except the foreman schedule"
