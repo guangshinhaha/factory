@@ -245,3 +245,14 @@ test_an_old_sf_act_failure_is_not_reported() {
   tick
   assert_contains "$(tail -n 1 "$TEST_TMP/tick.out")" "spawned sf-act for 1 action(s)"
 }
+
+test_t3_does_nothing_and_says_the_foreman_replaces_it() {
+  tick_world
+  FACTORY_ORCH=t3
+  export FACTORY_ORCH
+  tick
+  assert_eq 1 "$tick_status" "sf-tick exit status"
+  assert_contains "$(cat "$TEST_TMP/tick.out")" "the factory:foreman scheduled task replaces it"
+  assert_eq 0 "$(terminals)" "terminals"
+  [ ! -e "$FACTORY_TICK_LOCK" ] || fail "lock taken under t3"
+}

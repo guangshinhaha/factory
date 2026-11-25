@@ -17,6 +17,9 @@
 #     Never pushes the default branch, and runs none of the repo's git hooks (see below).
 #  3. Orca automation `factory-<owner>/<repo>` (cron every 5 min, claude, prompt /factory:foreman,
 #     precheck an absolute-path sf-tick with this PATH, in the workspace): created unless one with that name exists.
+#     With FACTORY_ORCH=t3 there is no Orca: a shell can't call T3's tools, so sf-init prints the exact
+#     `schedule_task` call that schedules the foreman (title factory-<owner>/<repo>, every 5 min,
+#     prompt running factory:foreman) for the agent to make, and ends `foreman: not scheduled`.
 #
 # Before any write it checks that gantry's gates resolve on this PATH, the one the automation's
 # precheck is given (Orca's own PATH has neither gantry nor the plugin's bin/), and fails naming
@@ -234,8 +237,18 @@ else
   fi
 fi
 
-# 3. The Orca automation.
+# 3. The foreman's schedule.
 auto=factory-$repo
+if [ "${FACTORY_ORCH:-orca}" = t3 ]; then
+  # Only an agent can call schedule_task (and list_scheduled_tasks to see whether it exists).
+  # shellcheck disable=SC2016 # jq program in single quotes
+  call=$(jq_lf -cn --arg t "$auto" --arg p "Run the factory foreman for $repo: invoke the factory:foreman skill with the argument $repo, in the repo's main checkout at $ws." \
+    '{title: $t, prompt: $p, schedule: {type: "interval", everyMs: 300000}, bindToCurrentThread: false, freshSession: true}')
+  echo "$me: foreman: not scheduled (T3 scheduled tasks can only be made by an agent)"
+  echo "$me: if list_scheduled_tasks has no task titled $auto, call schedule_task with: $call"
+  echo "$me: $repo set up except the foreman schedule"
+  exit 0
+fi
 orch_automation_list > "$tmp/autos" || die "Orca automations not listed (orca automations list failed)"
 found=$(jq -r --arg n "$auto" '
   .result | if type == "object" and (.automations | type) == "array" then .automations else error("no automations") end
