@@ -413,7 +413,7 @@ test_missing_gantry_gates_stop_before_acting() {
   PATH=$p "$TEST_TMP/nogantry/sh" "$FACTORY_ROOT/bin/sf-act" --repo "$REPO" 2> "$TEST_TMP/err" || status=$?
   assert_eq 1 "$status" "sf-act exit status"
   assert_contains "$(cat "$TEST_TMP/err")" "gantry-gate-evidence not found on PATH"
-  # The reason is where a person looks, not only on the terminal that closes.
+  # The reason is where a person looks, not only in the thread that ends.
   assert_contains "$(cat "$FACTORY_ACT_LOG")" "sf-act acme/app: gantry-gate-evidence not found on PATH"
   assert_eq 0 "$(count_calls 'gh ')" "gh calls"
 }

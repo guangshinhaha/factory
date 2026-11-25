@@ -349,7 +349,7 @@ stage() {
 }
 
 # post_timeline: the Run's last comment, once: each stamped stage with its time and the time since
-# the previous stamped stage, which holds that stage's run and any wait for the next sf-tick. Built
+# the previous stamped stage, which holds that stage's run and any wait for the next foreman fire. Built
 # only from the stamps above (UTC times sf-act wrote), never from text copied from GitHub.
 post_timeline() {
   pt_marks=$(markers_since_ready "$repo" "$issue") || { log "#$issue: timeline not posted: timeline not read"; return 0; }
@@ -447,7 +447,7 @@ limit_seen() {
   [ -n "$ld" ] || return 1
   orch_worker_read "$ld" 2> /dev/null | tail -c 3000 | grep -Eiq "$LIMIT_RE"
 }
-# last_output <dispatch>: the end of the worker's terminal on one line, for a stop comment.
+# last_output <dispatch>: the end of what the worker thread last said, on one line, for a stop comment.
 last_output() {
   orch_worker_read "$1" 2> /dev/null | tail -c 600 | tr -d '\r' | tr -s '\n\t ' ' ' | sed 's/^ //;s/ $//'
 }

@@ -5,7 +5,7 @@
     {
       "name": "factory",
       "source": "./",
-      "description": "Orca-native software factory: ready GitHub issues to merged PRs."
+      "description": "Software factory on T3 Code: ready GitHub issues to merged PRs."
     }
   ]
 }

@@ -958,14 +958,14 @@ test_cleanup_follows_a_finished_run_of_a_closed_issue() {
 test_cleanup_never_touches_a_worktree_the_factory_did_not_make() {
   world
   worktrees "[
-    {\"repo\":\"app\",\"path\":\"/main\",\"branch\":\"refs/heads/app-7\",\"isMainWorktree\":true,\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]},
+    {\"repo\":\"app\",\"path\":\"/main\",\"branch\":\"refs/heads/app-7\",\"isMainWorktree\":true,\"linkedIssue\":7,\"agents\":[]},
     $(wt /w/mine feature-x 7),
     $(wt /w/app-8 app-8 7),
     $(wt /w/nolink app-7 null),
     $(wt /w/app-9 app-9 9 | jq -c '.repo = "other"'),
     $(wt /w/xapp-7 xapp-7 7),
     {\"path\":\"/w/folder\",\"workspaceKind\":\"folder\"},
-    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"liveTerminalCount\":0,\"agents\":[]}]"
+    {\"path\":null,\"branch\":\"refs/heads/app-7\",\"repo\":\"app\",\"linkedIssue\":7,\"agents\":[]}]"
   assert_eq '[]' "$(state)" "actions"
 }
 

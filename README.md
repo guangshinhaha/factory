@@ -1,7 +1,9 @@
 # factory
 
-Orca-native, daemon-less software factory: turns `ready` GitHub issues into reviewed, merged PRs.
-See CLAUDE.md for the layout and the plan issue (#11).
+Daemon-less software factory on T3 Code: turns `ready` GitHub issues into reviewed, merged PRs.
+A T3 scheduled task runs the `factory:foreman` skill every 5 minutes (`sf-init` prints the call that
+creates it). See CLAUDE.md for the layout and the plan issue (#11), and `docs/decisions/t3-dispatch.md`
+for how stations are dispatched.
 
 ## Config
 
@@ -20,4 +22,4 @@ Set in the target repo's CLAUDE.md, on its default branch. `sf-init` adds `facto
   `codex/codex-auto-review`, verify `claude/opus`, debrief `claude/haiku`. A malformed or repeated line,
   or an unknown station or agent, stops the issue naming the line.
 
-Host-wide, in the environment: `FACTORY_MAX_RUNS` caps live Runs across all repos (default 4).
+In the environment: `FACTORY_MAX_RUNS` also caps the repo's live Runs (default 4); the lower of the two caps wins.

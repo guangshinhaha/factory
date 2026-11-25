@@ -1,5 +1,8 @@
 # Orca Run lifecycle (spike #10)
 
+> **Superseded** by [t3-dispatch.md](t3-dispatch.md) (2026-11-24, #112). Orca and `sf-tick` are removed;
+> this is kept as history.
+
 Date: 2026-11-15. Orca CLI at /Applications/Orca.app (ORCA_APP_VERSION of that day).
 Method: one Run (`run_0b064faaa37e`) with tasks `build -> review`, driven by hand from three
 different callers: a throwaway terminal that exited, this chat, and an automation precheck.
