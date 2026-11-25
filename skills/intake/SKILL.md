@@ -20,7 +20,7 @@ You decide; the factory acts. Read the issue and return one decision in your res
 
 ## Result
 
-Success status: `go`. Everything else reports `--outcome failed`.
+Success status: `go`. Anything else counts as failed.
 
 - `go`: `{"station":"intake","status":"go","tier":"medium","work_type":"feature","plan_first":false}`
 - `stop`: `{"station":"intake","status":"stop","reason":"no observable Done when: the issue says 'make onboarding better' and nothing a test can check"}`

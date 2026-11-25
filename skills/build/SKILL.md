@@ -21,7 +21,7 @@ You build and commit. The factory pushes, opens the PR, reviews, verifies and me
 
 ## Result
 
-Success status: `built`. Everything else reports `--outcome failed`.
+Success status: `built`. Anything else counts as failed.
 
 - `built`: `{"station":"build","status":"built","head_sha":"<git rev-parse HEAD>","commits":3,"checks":"scripts/check: 120 passed, 0 failed"}`
 - `stop`: `{"station":"build","status":"stop","reason":"Unbuildable: Done when asks for a --json flag the issue's Decided section rules out"}`

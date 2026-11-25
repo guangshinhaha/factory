@@ -29,7 +29,7 @@ Read `<shinstack>/playbooks/ship.md`, section "Verifier", and do its steps 3 to 
 
 ## Result
 
-Success statuses: `PASS` and `PASS+NOTES`. `FAIL` and `stop` report `--outcome failed`.
+Success statuses: `PASS` and `PASS+NOTES`. `FAIL` and `stop` count as failed.
 
 - verdict: `{"station":"verify","status":"PASS","verdict":"PASS","head_sha":"<sha>","comment_url":"<url>"}` (status and verdict are the same word)
 - `stop`: `{"station":"verify","status":"stop","reason":"head moved: PR is at <sha>, worktree at <sha>"}`

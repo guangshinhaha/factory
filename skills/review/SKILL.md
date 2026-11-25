@@ -5,7 +5,7 @@ description: "Factory review station: a cross-model review of a factory PR at th
 
 # Review
 
-Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Model: Codex where the host offers one, else the nearest model, and say which in your output; the verdict contract is unchanged. Read-only, apart from one PR comment.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Model: Codex where the host offers one, else the nearest model, and say which in your output; the verdict contract is unchanged. Never the bare `codex` CLI login. Read-only, apart from one PR comment.
 
 You review someone else's code from a different model family. You find what is wrong and prove it; you don't fix it.
 
@@ -41,7 +41,7 @@ A Codex usage limit is a hold, never a skip: if a command or tool reports a Code
 
 ## Result
 
-Success status: `clean`. Everything else reports `--outcome failed`.
+Success status: `clean`. Anything else counts as failed.
 
 - `clean`: `{"station":"review","status":"clean","head_sha":"<sha>","comment_url":"<url>","notes":2}`
 - `findings`: `{"station":"review","status":"findings","head_sha":"<sha>","comment_url":"<url>","findings":3}`

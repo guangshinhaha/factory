@@ -21,7 +21,7 @@ Intake sent this issue here because it is multi-file, cross-cutting or has a des
 
 ## Result
 
-Success status: `planned`. Everything else reports `--outcome failed`.
+Success status: `planned`. Anything else counts as failed.
 
 Unlike other stations, your output is the body: put the whole plan (`## PRs` with `### PR 1`, `## Decided`, `## Adversarial review`) in your final message body, above the result line. The factory posts the body minus its last line on the issue as is, so write it for the build station to follow cold and keep it free of anything else. A shinstack friction note, if you have one, goes last under `## shinstack friction`; it is posted with the plan.
 
