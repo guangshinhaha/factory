@@ -1,11 +1,11 @@
 ---
 name: plan
-description: "Factory plan station: plan a complex ready issue before build, with an adversarial review, and return the plan in worker_done. No code. Use only from a factory brief whose first line is `factory-role: plan`."
+description: "Factory plan station: plan a complex ready issue before build, with an adversarial review, and return the plan in your final message. No code. Use only from a factory brief whose first line is `factory-role: plan`."
 ---
 
 # Plan
 
-Runs as: Orca worker, `--agent claude --model opus`, in the repo's main checkout. Read-only.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out (the repo's main branch). Read-only.
 
 Intake sent this issue here because it is multi-file, cross-cutting or has a design fork the issue doesn't settle. You write the plan the build station follows; you don't build. The factory posts your plan on the issue, so the build station reads it as a plan the issue links. Never commit, never edit, label or comment on the issue, and never create an issue: `<shinstack>/playbooks/plan.md` step 5 is the factory's job here.
 
@@ -23,7 +23,7 @@ Intake sent this issue here because it is multi-file, cross-cutting or has a des
 
 Success status: `planned`. Everything else reports `--outcome failed`.
 
-Unlike other stations, your output is the body: put the whole plan (`## PRs` with `### PR 1`, `## Decided`, `## Adversarial review`) in the `worker_done` body, above the result line. The factory posts the body minus its last line on the issue as is, so write it for the build station to follow cold and keep it free of anything else. A shinstack friction note, if you have one, goes last under `## shinstack friction`; it is posted with the plan.
+Unlike other stations, your output is the body: put the whole plan (`## PRs` with `### PR 1`, `## Decided`, `## Adversarial review`) in your final message body, above the result line. The factory posts the body minus its last line on the issue as is, so write it for the build station to follow cold and keep it free of anything else. A shinstack friction note, if you have one, goes last under `## shinstack friction`; it is posted with the plan.
 
 - `planned`: `{"station":"plan","status":"planned"}`
 - `stop`: `{"station":"plan","status":"stop","reason":"needs split: the CLI flag and the storage migration are separate PRs; suggest one issue each, migration first"}`

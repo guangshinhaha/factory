@@ -5,7 +5,7 @@ description: "Factory intake station: decide whether a ready issue can be built,
 
 # Intake
 
-Runs as: Orca worker, `--agent claude --model sonnet`, in the repo's main checkout. Read-only.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out (the repo's main branch). Read-only.
 
 You decide; the factory acts. Read the issue and return one decision in your result line. Never call `sf-stop` or `sf-hold`, never edit, label or comment on the issue, and never commit.
 

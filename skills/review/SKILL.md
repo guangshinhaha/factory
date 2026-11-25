@@ -5,7 +5,7 @@ description: "Factory review station: a cross-model review of a factory PR at th
 
 # Review
 
-Runs as: Orca worker, `--agent codex --model codex-auto-review` (Orca's own Codex account; never the bare `codex` CLI login), in the PR branch's worktree. Read-only, apart from one PR comment.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Model: Codex where the host offers one, else the nearest model, and say which in your output; the verdict contract is unchanged. Read-only, apart from one PR comment.
 
 You review someone else's code from a different model family. You find what is wrong and prove it; you don't fix it.
 

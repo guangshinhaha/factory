@@ -46,7 +46,7 @@ test_plan_brief_names_the_plan_playbook_and_returns_the_plan_in_the_body() {
   b=$(cat "$TEST_TMP/brief")
   assert_contains "$b" "Read $FACTORY_ROOT/skills/plan/SKILL.md in full"
   assert_contains "$b" "- Playbook: $SHINSTACK_ROOT/playbooks/plan.md"
-  assert_contains "$b" "The plan in your \`worker_done\` body"
+  assert_contains "$b" "The plan in your final message"
   assert_contains "$b" "- Write nothing to GitHub."
   for fact in "- Branch:" "- PR:" "- Tier:" "- Work type:" "- Round:"; do
     if grep -qF -- "$fact" "$TEST_TMP/brief"; then fail "plan brief has [$fact]"; fi

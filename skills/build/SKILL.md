@@ -5,7 +5,7 @@ description: "Factory build station: build a ready issue on the branch the facto
 
 # Build
 
-Runs as: Orca worker, `--agent claude --model sonnet`, in the worktree on the brief's branch.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the brief's branch.
 
 You build and commit. The factory pushes, opens the PR, reviews, verifies and merges.
 
