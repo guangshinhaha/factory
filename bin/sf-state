@@ -1,12 +1,12 @@
 #!/bin/sh
-# sf-state: print what the factory should do next, as a JSON array, from GitHub and Orca alone.
+# sf-state: print what the factory should do next, as a JSON array, from GitHub and the orchestrator (lib/orch.sh) alone.
 # Usage: sf-state [owner/repo]   (default: the repo in the current directory, via gh)
 # Run from the repo's checkout: `factory-concurrency: N` is read from ./CLAUDE.md (default 2).
 # `factory-release-path: #N` in ./CLAUDE.md, while issue N is open: only ready issues listed in N's body
 # (list lines like `- #12`, `1. #12`, `- [ ] #12`) start, in list order (still honouring `Depends on`);
 # other ready issues are left alone. N closed: no path. A key that is not one `#N`, or an N that
 # does not exist, is an error and nothing starts.
-# FACTORY_MAX_RUNS caps live `factory */*#*` Runs host-wide (default 4).
+# FACTORY_MAX_RUNS caps the repo's live `factory <owner>/<repo>#*` Runs (default 4).
 #
 # Actions, one object each, sorted by issue:
 #   {"action":"start","issue":N}                         no Run yet; capacity, attempts and deps allow it
@@ -16,25 +16,24 @@
 #   {"action":"stop","issue":N,"reason":S}               dead Run with no hold, or 3 attempts since ready
 #     ... ,"run":R,"task":T}                             the dead Run's failed task: sf-act reads its result first
 #     ... ,"run":R,"task":T,"dispatch":D}                its worker stopped without reporting again after a nudge
-#   {"action":"nudge","issue":N,"run":R,"task":T,"dispatch":D}  Orca reported the worker of dispatched
+#   {"action":"nudge","issue":N,"run":R,"task":T,"dispatch":D}  the inbox says the worker of dispatched
 #                                                        task T stopped without reporting, not yet nudged
 #   {"action":"retry","issue":N,"run":R,"task":T}        the agent of dispatched task T ended with outcome=failure and no
-#                                                        report (Orca raised no escalation), not yet retried
+#                                                        report (no escalation names it), not yet retried
 #     ... stop ... ,"task":T,"agent_failed":true}        its retry's agent failed too: sf-act stops, with the agent's last output
 #   {"action":"hold","issue":N,"reason":S}               a `Depends on #M` issue is still open
 #   {"action":"abandon","issue":N,"run":R,"reason":S}    issue N closed before its live Run merged (no debrief)
 #   {"action":"cleanup","issue":N,"worktree":W}          closed issue N has no live Run, and W, a worktree the factory
 #                                                        made for it (not main, linked to N, branch `<repo>-N` or
 #                                                        `debrief-<repo>-N`) with no agent and no open PR from its
-#                                                        branch; its idle terminals (Orca's `Setup`, a shell) don't
-#                                                        block, sf-act closes them. The debrief worktree stays until
+#                                                        branch. The debrief worktree stays until
 #                                                        its docs PR merges, so it is not a leak
 # Otherwise a closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task
 # (they run after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
 #
 # Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
 # timeline (the last `ready` label event, and factory marker comments after it), open PRs,
-# every Orca worktree (`orca worktree ps`), and every Orca Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
+# every worktree, and every Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
 # the Run inbox's "Worker stopped without reporting" escalations when a task is dispatched.
 # Any failed read prints nothing on stdout and exits 1, so no action runs on partial state.
 set -eu
@@ -149,95 +148,66 @@ jq -sc '
 # The first 300 bytes of a file, for error messages (dd: `head -c` is not POSIX).
 snippet() { dd bs=300 count=1 < "$1" 2> /dev/null; }
 
-# Every factory Run host-wide (run-list is host-wide), page by page, with its tasks.
-# Each page and task list is checked whole (slurped: exactly one JSON document) for shape
+# Every factory Run the orchestrator lists, with its tasks.
+# The Run list and each task list are checked whole (slurped: exactly one JSON document) for shape
 # before use, so malformed JSON fails closed instead of looking like no Runs.
 factory_objective='^factory [^/ #]+/[^/ #]+#[0-9]+$'
 : > "$tmp/runs.jsonl"
-: > "$tmp/run-ids"
-cursor=
-seen_cursors=' '
 tab=$(printf '\t')
-while :; do
-  if [ -n "$cursor" ]; then
-    orch_run_list "$cursor" > "$tmp/page" \
-      || die "Orca Runs not listed (orca orchestration run-list failed)"
-  else
-    orch_run_list > "$tmp/page" \
-      || die "Orca Runs not listed (orca orchestration run-list failed)"
-  fi
-  # One pass checks the page whole (one document, an array of runs with string id and objective, a string
-  # or null nextCursor, no id twice across the pages so far) and prints the cursor line, then one TSV
-  # row per factory Run. A failed check is an `error("sf-state:<why>")`, named from jq's first stderr line.
-  jq -rs --arg re "$factory_objective" --rawfile seen "$tmp/run-ids" '
-    if (try (length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))) catch false) | not then error("sf-state:shape")
-    else .[0].result as $r
-      | if ($r | (.nextCursor == null or (.nextCursor | type == "string"))) | not then error("sf-state:cursor")
-        else (($seen | split("\n") | map(rtrimstr("\r") | select(. != ""))) + [$r.runs[].id]) as $all
-          | if ($all | length) != ($all | unique | length) then error("sf-state:dup")
-            else ($r.nextCursor // ""),
-              ($r.runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv) end
-        end
-    end' "$tmp/page" > "$tmp/page.rows" 2> "$tmp/jq.err" || {
-    jq_why=''
-    read -r jq_why < "$tmp/jq.err" || :
-    case "$jq_why" in
-      *sf-state:cursor*) die "Orca Runs not listed: nextCursor is not a string" ;;
-      *sf-state:dup*)
-        jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids"
-        dup=$(sort "$tmp/run-ids" | uniq -d | head -n 1)
-        dup=${dup%"$cr"}
-        die "Orca Runs not listed: Run id $dup is listed twice"
-        ;;
-      *) die "Orca Runs not listed: $(snippet "$tmp/page")" ;;
-    esac
-  }
-  # The cursor is the first row; the rest are the factory Runs.
-  { IFS= read -r cursor || :
-  cursor=${cursor%"$cr"}
-  while IFS="$tab" read -r id objective created; do
-    created=${created%"$cr"}
-    orch_task_list "$id" > "$tmp/tasks" \
-      || die "tasks of Run $id not listed (orca orchestration task-list failed)"
-    # One pass checks the task list whole and prints whether the Run's inbox is wanted (below), then the Run.
-    jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" --arg p "factory $repo#" \
-      'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string")))
-       | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}
-       | (any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))), .' \
-      "$tmp/tasks" > "$tmp/run.rows" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
-    { IFS= read -r want || :
-      IFS= read -r runline || :
-    } < "$tmp/run.rows"
-    printf '%s\n' "$runline" > "$tmp/run.json"
-    # A dispatched task's worker may have stopped without reporting: Orca says so in the Run inbox.
-    # Only a factory Run of this repo is acted on, so only its inbox is read.
-    if [ "${want%"$cr"}" = true ]; then
-      orch_inbox "$id" > "$tmp/inbox" \
-        || die "inbox of Run $id not read (orca orchestration inbox failed)"
-      jq -c -s -e --slurpfile run "$tmp/run.json" \
-        'select(length == 1) | .[0] | select(.ok == true and (.result.messages | type == "array"))
-         | $run[0] + {escalations: [.result.messages[] | select(.type == "escalation" and .subject == "Worker stopped without reporting")
-             | (try (.payload | fromjson) catch {}) as $p | select(($p.taskId | type) == "string" and ($p.dispatchId | type) == "string")
-             | {task: $p.taskId, dispatch: $p.dispatchId, at: .created_at}]}' \
-        "$tmp/inbox" > "$tmp/run-inbox.json" 2> /dev/null || die "inbox of Run $id not read: $(snippet "$tmp/inbox")"
-      mv "$tmp/run-inbox.json" "$tmp/run.json"
-    fi
-    # The Run is one line: copied by the shell, no cat.
-    IFS= read -r runline < "$tmp/run.json" || :
-    printf '%s\n' "$runline" >> "$tmp/runs.jsonl"
-  done
-  } < "$tmp/page.rows"
-  [ -n "$cursor" ] || break
-  jq -r '.result.runs[].id' "$tmp/page" >> "$tmp/run-ids" || die "Orca Runs not listed: $(snippet "$tmp/page")"
-  case "$seen_cursors" in
-    *" $cursor "*) die "Orca Runs not listed: run-list repeated cursor [$cursor]" ;;
+orch_run_list > "$tmp/page" || die "Runs not listed"
+# One pass checks the list whole (one document, an array of runs with string id and objective, no id
+# twice), then prints one TSV row per factory Run. A failed check is an `error("sf-state:<why>")`,
+# named from jq's first stderr line.
+jq -rs --arg re "$factory_objective" '
+  if (try (length == 1 and (.[0] | .ok == true and (.result.runs | type == "array") and all(.result.runs[]; (.id | type == "string") and (.objective | type == "string")))) catch false) | not then error("sf-state:shape")
+  else .[0].result.runs as $runs
+    | ([$runs[].id] | group_by(.) | map(select(length > 1) | .[0])) as $dup
+    | if ($dup | length) > 0 then error("sf-state:dup:\($dup[0])")
+      else $runs[] | select(.objective | test($re)) | [.id, .objective, .created_at] | @tsv end
+  end' "$tmp/page" > "$tmp/page.rows" 2> "$tmp/jq.err" || {
+  jq_why=''
+  read -r jq_why < "$tmp/jq.err" || :
+  jq_why=${jq_why%"$cr"}
+  case "$jq_why" in
+    *sf-state:dup:*) die "Runs not listed: Run id ${jq_why##*sf-state:dup:} is listed twice" ;;
+    *) die "Runs not listed: $(snippet "$tmp/page")" ;;
   esac
-  seen_cursors="$seen_cursors$cursor "
-done
+}
+while IFS="$tab" read -r id objective created; do
+  created=${created%"$cr"}
+  orch_task_list "$id" > "$tmp/tasks" \
+    || die "tasks of Run $id not listed"
+  # One pass checks the task list whole and prints whether the Run's inbox is wanted (below), then the Run.
+  jq -c -s -e --arg id "$id" --arg objective "$objective" --arg created "$created" --arg p "factory $repo#" \
+    'select(length == 1) | .[0] | select(.ok == true and (.result.tasks | type == "array") and all(.result.tasks[]; (.id | type == "string") and (.status | type == "string")))
+     | {id: $id, objective: $objective, created_at: $created, tasks: .result.tasks}
+     | (any(.tasks[]; .status == "dispatched") and (.objective | ascii_downcase | startswith($p | ascii_downcase))), .' \
+    "$tmp/tasks" > "$tmp/run.rows" 2> /dev/null || die "tasks of Run $id not listed: $(snippet "$tmp/tasks")"
+  { IFS= read -r want || :
+    IFS= read -r runline || :
+  } < "$tmp/run.rows"
+  printf '%s\n' "$runline" > "$tmp/run.json"
+  # A dispatched task's worker may have stopped without reporting: the Run inbox says so.
+  # Only a factory Run of this repo is acted on, so only its inbox is read.
+  if [ "${want%"$cr"}" = true ]; then
+    orch_inbox "$id" > "$tmp/inbox" \
+      || die "inbox of Run $id not read"
+    jq -c -s -e --slurpfile run "$tmp/run.json" \
+      'select(length == 1) | .[0] | select(.ok == true and (.result.messages | type == "array"))
+       | $run[0] + {escalations: [.result.messages[] | select(.type == "escalation" and .subject == "Worker stopped without reporting")
+           | (try (.payload | fromjson) catch {}) as $p | select(($p.taskId | type) == "string" and ($p.dispatchId | type) == "string")
+           | {task: $p.taskId, dispatch: $p.dispatchId, at: .created_at}]}' \
+      "$tmp/inbox" > "$tmp/run-inbox.json" 2> /dev/null || die "inbox of Run $id not read: $(snippet "$tmp/inbox")"
+    mv "$tmp/run-inbox.json" "$tmp/run.json"
+  fi
+  # The Run is one line: copied by the shell, no cat.
+  IFS= read -r runline < "$tmp/run.json" || :
+  printf '%s\n' "$runline" >> "$tmp/runs.jsonl"
+done < "$tmp/page.rows"
 
-# Every Orca worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
+# Every worktree, for cleanup. Checked whole for shape, like the Runs, so a bad read fails closed.
 orch_worktree_ps > "$tmp/worktrees.raw" \
-  || die "Orca worktrees not listed (orca worktree ps failed)"
+  || die "worktrees not listed"
 # Timelines: every ready issue, plus every open issue that is neither ready nor parked
 # (needs-shin, icebox) but has a factory Run, since a dead Run there still owes a stop.
 # A ready issue must have a `ready` label event: without one there is no attempt boundary.
@@ -255,7 +225,7 @@ if ! jq -rsc --arg repo "$repo" --slurpfile runs "$tmp/runs.jsonl" --slurpfile i
     elif $objs | index("factory \($r)#\($n)") then "\($n) run"
     else empty end)' "$tmp/worktrees.raw" > "$tmp/worktrees.rows" 2> "$tmp/jq.err"; then
   IFS= read -r wt_line < "$tmp/worktrees.rows" || :
-  [ -n "$wt_line" ] || die "Orca worktrees not listed: $(snippet "$tmp/worktrees.raw")"
+  [ -n "$wt_line" ] || die "worktrees not listed: $(snippet "$tmp/worktrees.raw")"
   while IFS= read -r jq_why; do printf '%s\n' "$jq_why" >&2; done < "$tmp/jq.err"
   die "open issues not read: the issue list has an unexpected shape"
 fi
@@ -413,7 +383,7 @@ def run_state:
     | [$prs[0][] | select((.headRefName | split("/") | last) as $h | $h == $b or ($h | startswith("\($b)-")))]
     | first;
 
-  # A dispatched task whose worker Orca reported as stopped without reporting: nudge it once
+  # A dispatched task whose worker the inbox says stopped without reporting: nudge it once
   # (a nudge marker names the dispatch); stopped again after the nudge, stop.
   def nudge_actions($c; $r):
     $r.tasks[] | select(.status == "dispatched") | . as $t
@@ -428,8 +398,8 @@ def run_state:
 
   # The agent of a dispatched build, review or verify (the branch worktree of the issue) or debrief
   # (its debrief worktree) ended with outcome=failure and no report: every agent there is done
-  # and one failed, so a live agent (the retry one) is never mistaken for it. Orca raises no
-  # escalation for a failed agent (#57), so `worktree ps` is the only witness. intake and plan
+  # and one failed, so a live agent (the retry one) is never mistaken for it. No escalation
+  # names a failed agent (#57), so the worktree list is the only witness. intake and plan
   # run in the main checkout, which no worktree row names.
   def agent_failed($c; $t):
     ($t.title | split(" ")[0]) as $station
@@ -505,8 +475,7 @@ def run_state:
   | ([$idle[] | select(.attempts < 3 and (.deps | length) == 0)] | .[0:$capacity] | map({action: "start", issue: .n})) as $starts
   # Cleanup: a closed issue with no live Run, and a worktree made for it by the factory. Only the
   # names the factory gives count, never other worktrees on the host, and no agent alive in it.
-  # Terminals do not block: Orca leaves a Setup terminal open in every worktree, so sf-act
-  # closes them before the removal. A worktree whose branch has an open PR stays: a
+  # A worktree whose branch has an open PR stays: a
   # debrief-<repo>-N worktree stays until its docs PR merges, so a leftover one is not a leak.
   | ([$runs[] | select(.state == "live") | .objective | lc] | map(select(startswith("factory \($repo_lc)#")))) as $live_objs
   | ([$worktrees[0][] | select(.isMainWorktree != true and (.path | type) == "string" and (.repo // "") == $name and ((.agents // []) | length) == 0

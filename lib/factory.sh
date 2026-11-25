@@ -58,7 +58,7 @@ resolve_repo() {
 }
 
 # act_log <owner/repo>: the path of the file where sf-act leaves why it last failed (one line,
-# replaced by each failure, removed by a clean run). sf-tick reads it. FACTORY_ACT_LOG overrides.
+# replaced by each failure, removed by a clean run). FACTORY_ACT_LOG overrides.
 act_log() {
   printf '%s\n' "${FACTORY_ACT_LOG:-/tmp/factory-act-$(id -u)-${1%%/*}-${1#*/}.log}"
 }
@@ -184,7 +184,7 @@ ask_body_text() {
     printf -- '- `gh pr checks %s -R %s`: every check passes.\n' "$ab_pr" "$ab_repo"
     printf -- '- `gh pr view %s -R %s --json headRefOid -q .headRefOid`: prints the head above; a different SHA means the head moved.\n' "$ab_pr" "$ab_repo"
   else
-    printf '**Check it yourself:** `gh issue view` the issue and the Run in Orca; there is no PR to diff yet.\n'
+    printf '**Check it yourself:** `gh issue view` the issue and its Run'"'"'s comments; there is no PR to diff yet.\n'
   fi
   if [ -z "$ab_action" ]; then
     if [ -n "$ab_other" ]; then

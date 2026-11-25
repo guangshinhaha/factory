@@ -1,13 +1,12 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2016,SC2154 # jq programs in single quotes; repo and tmp come from the caller
-# The T3 Code implementation of lib/orch.sh's functions (issue #112), sourced by lib/orch.sh when
-# FACTORY_ORCH=t3. Same names, arguments, exit codes and stdout shapes as the Orca one, so sf-state's
-# and sf-act's parsers do not change. Formats: docs/decisions/t3-dispatch.md.
+# The T3 Code implementation of lib/orch.sh's functions (issue #112), sourced by lib/orch.sh. Names,
+# arguments, exit codes and stdout shapes are the contract there. Formats: docs/decisions/t3-dispatch.md.
 #
 # A shell script cannot call T3's tools, so nothing here starts, stops or messages a worker:
 #   - Runs, tasks, dispatches and results are marker comments on the issue (the existing
 #     `<!-- factory:{"kind":...} -->` grammar, kinds run, task, status, dispatch, result), read back
-#     with one repo-wide `gh api .../issues/comments` per process and folded into Orca's task model.
+#     with one repo-wide `gh api .../issues/comments` per process and folded into the contract's task model.
 #   - Liveness comes from the T3 thread snapshot the foreman writes for each fire, a JSON file named
 #     by FACTORY_T3_THREADS: {"threads":[{"id","title","status","updatedAt","lastMessage"}]}.
 #     A thread belongs to dispatch D when its title ends with `[D]`.
@@ -24,8 +23,7 @@ t3_cr=$(printf '\r')
 t3_trusted='["OWNER","MEMBER","COLLABORATOR"]'
 
 # The fold: marker records ({issue, at, m}) in comment order into {runs, tasks{id: task}, disp{D: ...},
-# results{D: ...}}, the way Orca keeps them. A pending task whose deps are all completed turns ready
-# after every record, as Orca promotes on each update. A result counts only for the task's current,
+# results{D: ...}}. A pending task whose deps are all completed turns ready after every record. A result counts only for the task's current,
 # still dispatched dispatch; only a dispatch's first result is read. A task, dispatch, result or status
 # marker counts only on the issue of its Run (task) or task (the rest), never from another issue. A missing outcome is failed.
 # threads: the snapshot's threads (an error when the snapshot is bad); thread(D): D's thread, a live
@@ -148,15 +146,11 @@ t3_request() {
 }
 
 # ---- Runs -----------------------------------------------------------------------------------------
-# Runs are this repo's only (Orca's list was host-wide): one page, no cursor.
+# Runs are this repo's only.
 
 orch_run_list() {
-  if [ -n "${1:-}" ]; then
-    echo '{"ok":true,"result":{"runs":[],"nextCursor":null}}'
-    return 0
-  fi
   t3_records || return 1
-  t3_jq -c "$T3_DEFS"'fold | {ok: true, result: {runs: .runs, nextCursor: null}}' \
+  t3_jq -c "$T3_DEFS"'fold | {ok: true, result: {runs: .runs}}' \
     || { echo "orch-t3: Runs not listed: $(t3_why)" >&2; return 1; }
 }
 
@@ -326,8 +320,7 @@ orch_worker_send() { t3_worker_request "$1" send "$3" "$4"; }
 
 # orch_inbox <run>: an escalation "Worker stopped without reporting" for each dispatched task of the
 # Run whose thread's turn is over with no result: completed or idle; failed, interrupted, cancelled
-# or rolled back only for intake and plan (the other stations' worktree row witnesses that, as
-# Orca's worktree ps does). Its time is the thread's updatedAt. A dispatched task whose thread the
+# or rolled back only for intake and plan (the other stations' worktree row witnesses that). Its time is the thread's updatedAt. A dispatched task whose thread the
 # snapshot lacks gets its dispatch request again, so a start lost in a crash converges.
 orch_inbox() {
   t3_records || return 1
@@ -361,7 +354,7 @@ EOF
 
 # ---- Worktrees ------------------------------------------------------------------------------------
 
-# orch_worktree_ps: the checkout's git worktrees as Orca's rows. linkedIssue comes from a factory
+# orch_worktree_ps: the checkout's git worktrees as the contract's rows. linkedIssue comes from a factory
 # branch name (<name>-<n>, debrief-<name>-<n>); agents are the open dispatches of that issue's tasks
 # whose station works on that branch, with state done (turn over), running, or unknown (no thread),
 # and outcome failure for a failed, interrupted, cancelled or rolled back thread.
@@ -423,13 +416,3 @@ orch_worktree_rm() {
   if [ -n "$_wr_b" ]; then git branch -q -d "$_wr_b" > /dev/null 2>&1 || :; fi
   t3_ok
 }
-
-# ---- Terminals and automations ------------------------------------------------------------------
-# T3 has no terminals (sf-act runs in the foreman's own session) and no automations (the cron is a
-# T3 scheduled task, issue #112 step 4).
-
-orch_terminal_list() { echo '{"ok":true,"result":{"terminals":[]}}'; }
-orch_terminal_close() { t3_ok; }
-orch_terminal_create() { echo "orch-t3: terminal [$2] not created: T3 has no terminals; the foreman runs sf-act itself" >&2; return 1; }
-orch_automation_list() { echo "orch-t3: automations not listed: T3 has none; the foreman is a T3 scheduled task" >&2; return 1; }
-orch_automation_create() { echo "orch-t3: automation [$1] not created: T3 has none; schedule the foreman with T3's schedule_task" >&2; return 1; }

@@ -132,14 +132,14 @@ test_ask_body_reads_a_pr_clean_from_a_jq_that_ends_lines_in_crlf() {
   assert_contains "$out" 'risk:high'
 }
 
-# sf-init's world (fixtures for gh and orca, the git remote) comes from its own test file.
+# sf-init's world (fixtures for gh, the git remote) comes from its own test file.
 init_helpers() {
   REPO=acme/app LABELS_Q='.[].name' PR_URL=https://github.com/acme/app/pull/9 TITLE='chore: set up the factory (sf-init)'
   . "$FACTORY_ROOT/test/init_world.sh"
   eval "$(awk '/^# world:/ { f = 1 } f' "$FACTORY_ROOT/test/sf_init_test.sh" | sed -n '1,/^remote_file()/p')"
 }
 
-test_sf_init_sees_an_existing_automation_under_a_jq_that_ends_lines_in_crlf() {
+test_sf_init_prints_the_schedule_call_under_a_jq_that_ends_lines_in_crlf() {
   init_helpers
   world
   labels "ready
@@ -147,12 +147,11 @@ needs-shin
 icebox
 risk:high"
   open_pr '[{"url":"'"$PR_URL"'","isCrossRepository":false}]'
-  automations '[{"id":"a1","name":"factory-acme/app"}]'
   crlf_jq
   out=$(sh "$FACTORY_ROOT/bin/sf-init" --repo "$REPO" --workspace "$WS" 2>&1) || fail "$out"
   assert_contains "$out" "file changes wait on $PR_URL"
-  assert_contains "$out" "automation factory-acme/app exists"
-  assert_eq 0 "$(count_calls "orca automations create")" "automations created"
+  assert_contains "$out" 'call schedule_task with: {"title":"factory-acme/app"'
+  case "$out" in *"$(printf '\r')"*) fail "a CR in the output: $out" ;; esac
 }
 
 test_sf_brief_finds_shinstack_clean_under_a_jq_that_ends_lines_in_crlf() {
