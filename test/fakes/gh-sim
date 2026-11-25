@@ -1,0 +1,31 @@
+#!/bin/sh
+# shellcheck disable=SC2016 # jq programs in single quotes
+# A fake gh with stateful issue comments, for the T3 orchestrator (lib/orch-t3.sh). Not on PATH by
+# itself: a test puts a `gh` wrapper that sources it in front of test/fakes (see test/t3_world.sh).
+# `gh issue comment <n> -R <repo> --body-file -` stores the comment in $GH_SIM/comments.jsonl
+# (author $GH_SIM_AUTHOR, default OWNER) and logs like fake-cli (the call to $FAKE_LOG, the body to
+# $FAKE_LOG.stdin); `gh api repos/<repo>/issues/comments?... --paginate` prints the stored comments
+# as two pages, so a reader must join pages (logged unless $GH_SIM_QUIET is set). Every other call goes to the fixture fake.
+set -u
+store=$GH_SIM/comments.jsonl
+[ -f "$store" ] || : > "$store"
+if [ "${1:-}" = issue ] && [ "${2:-}" = comment ]; then
+  [ -z "${FAKE_LOG:-}" ] || printf '%s\n' "gh $*" >> "$FAKE_LOG"
+  body=$(cat)
+  [ -z "${FAKE_LOG:-}" ] || printf '%s\n' "$body" >> "$FAKE_LOG.stdin"
+  repo=$5
+  jq -cn --arg n "$3" --arg repo "$repo" --arg b "$body" --arg a "${GH_SIM_AUTHOR:-OWNER}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{issue_url: "https://api.github.com/repos/\($repo)/issues/\($n)", author_association: $a, body: $b, created_at: $at}' >> "$store"
+  echo "https://github.com/$repo/issues/$3#issuecomment"
+  exit 0
+fi
+case "${1:-} ${2:-}" in
+  "api repos/"*"/issues/comments?"*)
+    [ -n "${GH_SIM_QUIET:-}" ] || [ -z "${FAKE_LOG:-}" ] || printf '%s\n' "gh $*" >> "$FAKE_LOG"
+    jq -cs '(length / 2 | floor) as $h | .[0:$h], .[$h:]' "$store"
+    exit 0
+    ;;
+esac
+set -- gh "$@"
+# shellcheck source=test/fakes/fake-cli
+. "$FACTORY_ROOT/test/fakes/fake-cli"

@@ -3,7 +3,8 @@
 # in parallel across test functions; a pool of $jobs workers claims units and prints each result as soon as its test finishes.
 # Usage: test/run [file...]   (default: test/*_test.sh)
 #
-# Each test gets PATH = <fakes dir>:<guard dir>:$PATH. The fakes dir is
+# Each test gets PATH = <fakes dir>:<guard dir>:<this bin>:$PATH (this bin before an installed
+# factory's, so sf-act runs this checkout's sf-state). The fakes dir is
 # $FACTORY_FAKES (default test/fakes). The guard dir holds gh, orca and gantry-* gate shims
 # that log and exit 99, so a call that finds no fake never reaches the real
 # CLI, and any guard hit fails the test even if the test ignored the error.
@@ -48,7 +49,7 @@ run_unit() {
     FAKE_FIXTURES=
     FACTORY_GUARD_LOG=$tmp/guard.log
     TEST_TMP=$tmp/work
-    PATH=$fakes:$results/guard:$PATH
+    PATH=$fakes:$results/guard:$FACTORY_ROOT/bin:$PATH
     # Even a real gh that slipped past the guard would have no credentials.
     # HOME moves too, so per-user config and credentials (orca's included) are out of reach.
     GH_CONFIG_DIR=$tmp/work/gh-config
