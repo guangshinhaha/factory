@@ -379,3 +379,35 @@ test_missing_gantry_gates_exit_1_naming_the_command_before_any_write() {
   assert_eq "" "$(writes)" "writes"
   assert_eq 0 "$(count_calls "gh ")" "gh calls"
 }
+
+test_t3_prints_the_schedule_task_call_and_reports_the_foreman_unscheduled() {
+  world
+  FACTORY_ORCH=t3
+  export FACTORY_ORCH
+  sf_init > "$TEST_TMP/out" || fail "sf-init failed under t3"
+  out=$(cat "$TEST_TMP/out")
+  assert_contains "$out" "foreman: not scheduled"
+  assert_contains "$out" "$REPO set up except the foreman schedule"
+  call=$(sed -n 's/^sf-init: if list_scheduled_tasks .* with: //p' "$TEST_TMP/out" | tr -d '\r')
+  assert_eq factory-acme/app "$(printf '%s' "$call" | jq -r .title | tr -d '\r')" "task title"
+  assert_eq 300000 "$(printf '%s' "$call" | jq -r .schedule.everyMs | tr -d '\r')" "interval"
+  assert_eq interval "$(printf '%s' "$call" | jq -r .schedule.type | tr -d '\r')" "schedule type"
+  assert_contains "$(printf '%s' "$call" | jq -r .prompt)" "factory:foreman skill with the argument acme/app"
+  # The setup it can do is still done, and no Orca call is made.
+  assert_eq 1 "$(count_calls "gh pr create")" "PRs"
+  assert_eq 0 "$(count_calls "orca ")" "orca calls"
+}
+
+test_t3_rerun_writes_nothing() {
+  world
+  FACTORY_ORCH=t3
+  export FACTORY_ORCH
+  labels "ready
+needs-shin
+icebox
+risk:high"
+  open_pr "[{\"url\":\"$PR_URL\",\"isCrossRepository\":false}]"
+  sf_init > "$TEST_TMP/out" || fail "sf-init failed under t3"
+  assert_eq "" "$(writes)" "writes"
+  assert_contains "$(cat "$TEST_TMP/out")" "foreman: not scheduled"
+}

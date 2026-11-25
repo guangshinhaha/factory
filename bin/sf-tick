@@ -11,6 +11,8 @@
 # over: its pid is gone; no pid 2 minutes after it was taken (sf-act never started); or older
 # than 3 hours whatever the pid says.
 #
+# With FACTORY_ORCH=t3 it does nothing: the factory:foreman agent, run by a T3 scheduled task, replaces it.
+#
 # Exit 1 always (2 on bad arguments). The last line of stdout says what happened.
 set -u
 
@@ -26,6 +28,10 @@ bindir=$root/bin
 need_jq
 repo=$(resolve_repo "${1:-}") || exit 2
 printf '%s\n' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || usage_error "repo [$repo] is not owner/repo"
+if [ "${FACTORY_ORCH:-orca}" = t3 ]; then
+  echo "$me: FACTORY_ORCH=t3: sf-tick does nothing; the factory:foreman scheduled task replaces it (see sf-init); nothing done for $repo"
+  exit 1
+fi
 lock=${FACTORY_TICK_LOCK:-/tmp/factory-tick-$(id -u).lock}
 case "$lock$bindir$(pwd)$PATH" in
   *"'"*) usage_error "a path or PATH holds a single quote: $lock $bindir $(pwd)" ;;
