@@ -40,13 +40,13 @@ Put no JSON object in the comment, not even quoted: gantry's verdict check reads
 
 Pullfrog is an outside review bot. It finds leads; you prove them; the factory's fix round fixes them. It is set up when `git cat-file -e origin/<base>:.github/workflows/pullfrog.yml` succeeds. If not, write `Pullfrog: not set up` in `Covered:` and skip this section.
 
-1. **Wait for its run at the head.** The `pullfrog` check says only that the run ended: it is `success` with findings open. Run this as one command with a 10 minute timeout. It gives up after about 3 minutes with no check, and about 9 in all:
+1. **Wait for its run at the head.** The `pullfrog` check says only that the run ended: it is `success` with findings open. Run this as one command with a 10 minute timeout. It gives up after about 3 minutes of misses in a row (no check, or a failed lookup), and about 8 in all:
 
 ```sh
-i=0
-while [ "$i" -lt 18 ]; do
+i=0; miss=0
+while [ "$i" -lt 16 ]; do
   s=$(gh api "repos/<repo>/commits/<head>/check-runs?check_name=pullfrog" -q '[.check_runs[]|select(.app.slug=="pullfrog")]|sort_by(.started_at)|last|if . == null then "none" elif .status=="completed" then .conclusion else "running" end') || s=error
-  case $s in none|error) [ "$i" -ge 6 ] && break ;; running) ;; *) break ;; esac
+  case $s in none|error) miss=$((miss+1)); [ "$miss" -ge 7 ] && break ;; running) miss=0 ;; *) break ;; esac
   sleep 30; i=$((i+1))
 done
 echo "pullfrog: $s"
