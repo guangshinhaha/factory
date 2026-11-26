@@ -765,7 +765,11 @@ test_a_failed_worker_that_only_mentions_429_is_not_held() {
 }
 test_a_rejected_dispatch_stops_for_a_person() {
   antigravity_review
+  before=$(dispatch_count "$(id_of review)")
+  sent=$(requests_of dispatch | wc -l)
   rejected 'delegate_task rejected: provider antigravity is not available'
+  assert_eq "$before" "$(dispatch_count "$(id_of review)")" "dispatches"
+  assert_eq "$sent" "$(requests_of dispatch | wc -l)" "dispatch requests"
   assert_eq 0 "$(count_calls sf-hold)" "holds"
   assert_eq 1 "$(count_calls sf-stop)" "stops"
 }
