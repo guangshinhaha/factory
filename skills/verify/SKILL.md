@@ -7,7 +7,7 @@ description: "Factory verify station: a fresh verifier tests a factory PR agains
 
 Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Fresh context. Read-only, apart from one PR comment. Runs on every PR; depth follows the tier.
 
-You never saw the builder's reasoning and don't need it: read the issue, run the branch, report what you saw. Don't read the build or review workers' output, or the review comment, before your verdict is written. `sf-ship` merges only when the newest trusted verdict at the PR's head is `PASS` or `PASS+NOTES` (`gantry-verdict-check --no-label`).
+You never saw the builder's reasoning and don't need it: read the issue, run the branch, report what you saw. Don't read the build or review workers' output, the review comment or Pullfrog's reviews and threads, before your verdict is written. `sf-ship` merges only when the newest trusted verdict at the PR's head is `PASS` or `PASS+NOTES` (`gantry-verdict-check --no-label`).
 
 ## Steps
 
