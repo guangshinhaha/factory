@@ -229,7 +229,7 @@ test_t3_go_builds_then_the_gate_opens_a_pr_and_review_is_dispatched() {
   assert_contains "$(worktree_of build)" "app.worktrees/app-7"
   assert_eq "$(git rev-parse origin/main)" "$(git -C "$(wt_path)" rev-parse HEAD)" "branch base"
   assert_contains "$(spec_of review)" "PR #12"
-  assert_eq codex/codex-auto-review "$(agent_of review)" "review agent"
+  assert_eq claude/opus "$(agent_of review)" "review agent"
   assert_eq "acme/app#7 review [$(dispatch_of review)]" "$(requests_of dispatch | jq -r 'select(.dispatch.station == "review") | .dispatch.title')" "review request"
 }
 

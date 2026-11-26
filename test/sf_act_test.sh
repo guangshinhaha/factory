@@ -5,6 +5,9 @@
 # shellcheck source=test/act_world.sh
 . "$FACTORY_ROOT/test/act_world.sh"
 
+# codex_review: the repo opts review back onto Codex.
+codex_review() { claude_md 'factory-model.review: codex/codex-auto-review'; }
+
 test_a_fresh_issue_gets_an_attempt_marker_then_one_run_with_intake_and_route() {
   world
   acts
@@ -117,7 +120,7 @@ test_gate_pass_opens_a_draft_pr_and_queues_review_verify_and_ship() {
   assert_called "gh pr create -R acme/app --draft --head app-7 --base main --title Greet people --body-file -"
   assert_contains "$(fake_stdin)" "Closes #7"
   assert_eq completed "$(status_of gate)" "gate"
-  assert_eq codex/codex-auto-review "$(agent_of review)" "review agent"
+  assert_eq claude/opus "$(agent_of review)" "review agent"
   assert_contains "$(spec_of review)" "PR #12"
   assert_eq pending "$(status_of verify)" "verify"
   assert_eq pending "$(status_of ship)" "ship"
@@ -145,6 +148,7 @@ EOF
 
 test_review_without_codex_posts_not_run_and_verify_starts() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -166,6 +170,7 @@ test_review_without_codex_posts_not_run_and_verify_starts() {
 
 test_review_at_a_codex_usage_limit_holds() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -180,6 +185,7 @@ test_review_at_a_codex_usage_limit_holds() {
 
 test_review_that_fails_to_start_otherwise_stops() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -282,6 +288,7 @@ test_a_station_agent_that_failed_without_reporting_is_retried_once_then_stopped(
 
 test_a_station_agent_that_failed_at_a_usage_limit_is_held_not_retried() {
   world
+  codex_review
   to_review
   agent_ended failed 'Codex usage limit reached. Try again at Dec 15th.'
   acts
@@ -699,6 +706,84 @@ test_factory_sensitive_forces_review_onto_claude_over_any_review_line() {
   claude_md "$(printf 'factory-sensitive: true\nfactory-model.review: codex/codex-auto-review')"
   to_review
   assert_eq claude/opus "$(agent_of review)" "review agent"
+}
+
+test_a_factory_model_line_puts_review_on_antigravity() {
+  world
+  claude_md "$(printf 'factory-model.review: antigravity/gemini-4-hydrogen')"
+  to_review
+  assert_eq antigravity/gemini-4-hydrogen "$(agent_of review)" "review agent"
+}
+
+test_factory_sensitive_keeps_review_on_claude_over_an_antigravity_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true\nfactory-model.review: antigravity/gemini-4-hydrogen')"
+  to_review
+  assert_eq claude/opus "$(agent_of review)" "review agent"
+}
+
+test_an_antigravity_review_that_fails_to_start_is_never_recorded_as_not_run() {
+  world
+  claude_md "$(printf 'factory-model.review: antigravity/gemini-4-hydrogen')"
+  to_build
+  echo "PASS" | fixture gantry-gate-evidence --force-with-lease
+  open_pr_seq app-7 '' 12
+  fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
+  finish build "$BUILT"
+  comment_fails dispatch "antigravity: not logged in"
+  act
+  assert_eq ready "$(status_of review)" "review"
+  assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
+}
+
+# antigravity_hold <message>: a start that fails with it holds the issue for antigravity.
+antigravity_hold() {
+  world
+  claude_md "$(printf 'factory-model.intake: antigravity/gemini-4-hydrogen')"
+  comment_fails dispatch "$1"
+  act
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " antigravity "
+}
+test_an_antigravity_quota_error_holds() { antigravity_hold 'Resource has been exhausted (e.g. check quota)'; }
+
+# rejected <body>: the foreman's failed result for the review dispatch the host would not take.
+rejected() {
+  result_marker "$(dispatch_of review)" "$1" failed
+  acts
+}
+antigravity_review() {
+  world
+  claude_md 'factory-model.review: antigravity/gemini-4-hydrogen'
+  to_review
+}
+
+test_a_failed_worker_that_only_mentions_429_is_not_held() {
+  antigravity_review
+  rejected 'Tests fail: the client should retry on status 429 or RESOURCE_EXHAUSTED, but the PR drops it.'
+  assert_eq 0 "$(count_calls sf-hold)" "holds"
+  assert_eq 1 "$(count_calls sf-stop)" "stops"
+}
+test_a_rejected_dispatch_stops_for_a_person() {
+  antigravity_review
+  before=$(dispatch_count "$(id_of review)")
+  sent=$(requests_of dispatch | wc -l)
+  rejected 'delegate_task rejected: provider antigravity is not available'
+  assert_eq "$before" "$(dispatch_count "$(id_of review)")" "dispatches"
+  assert_eq "$sent" "$(requests_of dispatch | wc -l)" "dispatch requests"
+  assert_eq 0 "$(count_calls sf-hold)" "holds"
+  assert_eq 1 "$(count_calls sf-stop)" "stops"
+}
+test_a_rejected_dispatch_at_a_quota_holds_its_provider() {
+  antigravity_review
+  rejected 'delegate_task rejected: quota exceeded'
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " antigravity "
+}
+test_a_numbered_factory_sensitive_line_never_leaves_review_on_antigravity() {
+  world
+  claude_md "$(printf '1. factory-sensitive: true\nfactory-model.review: antigravity/gemini-4-hydrogen')"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "is not factory-sensitive"
+  assert_eq "" "$(requests_of dispatch)" "workers"
 }
 
 test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run() {

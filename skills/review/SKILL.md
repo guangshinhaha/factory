@@ -1,13 +1,13 @@
 ---
 name: review
-description: "Factory review station: a cross-model review of a factory PR at the depth its tier names, posted as one Covered/Findings PR comment. Use only from a factory brief whose first line is `factory-role: review`."
+description: "Factory review station: an independent review of a factory PR at the depth its tier names, posted as one Covered/Findings PR comment. Use only from a factory brief whose first line is `factory-role: review`."
 ---
 
 # Review
 
-Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Model: Codex where the host offers one, else the nearest model, and say which in your output; the verdict contract is unchanged. Never the bare `codex` CLI login. Read-only, apart from one PR comment.
+Runs as: T3 child (dispatched by factory:foreman via delegate_task), clean worktree already checked out on the PR branch. Model: the one the factory dispatched you on; say which in your output; the verdict contract is unchanged. Never the bare `codex` CLI login. Read-only, apart from one PR comment.
 
-You review someone else's code from a different model family. You find what is wrong and prove it; you don't fix it.
+You review code you did not write. You find what is wrong and prove it; you don't fix it.
 
 ## Steps
 
@@ -69,7 +69,7 @@ None of these stops the review or counts as a finding.
 
 ## Usage limit and access
 
-A Codex usage limit is a hold, never a skip: if a command or tool reports a Codex usage limit, post no comment and report `hold` with `provider` `codex` and the reset time in UTC (`2026-11-15T10:00:00Z`; when you can't tell, an hour from now). If Codex can't start at all (not installed, not signed in), there is no worker to report: the factory sees the failed start and posts `Codex review not run: <reason>` itself. Never post that line from here.
+A usage limit is a hold, never a skip: if a command or tool reports a usage limit, post no comment and report `hold` with `provider` set to the one you run on (`claude`, `codex` or `antigravity`) and the reset time in UTC (`2026-11-15T10:00:00Z`; when you can't tell, an hour from now). If your model can't start at all, there is no worker to report: the factory handles the failed start itself (for Codex without access, with a `Codex review not run: <reason>` comment). Never post that line from here.
 
 ## Result
 
@@ -78,5 +78,5 @@ Success status: `clean`. Anything else counts as failed.
 - `clean`: `{"station":"review","status":"clean","head_sha":"<sha>","comment_url":"<url>","notes":2}`
 - `findings`: `{"station":"review","status":"findings","head_sha":"<sha>","comment_url":"<url>","findings":3}`
 - `findings`, every one fixable by PR body text alone (a missing mapping or evidence section, a stale head label): add `"body_only":true,"body_append":"<markdown the factory appends to the PR body>"`. The factory appends it and carries on without a fix round. Any finding that needs code or a test is not body-only: leave both fields out.
-- `hold`: `{"station":"review","status":"hold","provider":"codex","reset":"2026-11-15T10:00:00Z","reason":"Codex usage limit"}`
+- `hold`: `{"station":"review","status":"hold","provider":"antigravity","reset":"2026-11-15T10:00:00Z","reason":"usage limit"}`
 - `stop`: `{"station":"review","status":"stop","reason":"head moved: PR is at <sha>, worktree at <sha>"}`

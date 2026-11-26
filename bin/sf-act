@@ -102,7 +102,7 @@ js() {
 # The first 400 bytes of stdin, for a result reason.
 clip() { dd bs=400 count=1 2> /dev/null; }
 
-# Usage-limit wording from Claude Code and Codex.
+# Usage-limit wording. It is matched against a worker's own text too, so no bare codes like 429.
 LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many requests|try again (at|in)'
 
 # ---- Runs and tasks -------------------------------------------------------------------------
@@ -507,7 +507,7 @@ default_model() {
     intake) echo "claude sonnet" ;;
     plan) echo "claude opus" ;;
     build) echo "claude sonnet" ;;
-    review) echo "codex codex-auto-review" ;;
+    review) echo "claude opus" ;;
     verify) echo "claude opus" ;;
     debrief) echo "claude haiku" ;;
   esac
@@ -525,21 +525,21 @@ model_for() {
   git -C "$main" show "$mdef:CLAUDE.md" > "$tmp/claude.raw" 2> /dev/null || : > "$tmp/claude.raw"
   LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 2; }
   # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
-  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
-  # Same for factory-sensitive: a near-miss would leave review on Codex for a sensitive repo.
-  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?sensitive' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  LC_ALL=C grep -aEi '^[^a-z]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
+  # Same for factory-sensitive: a near-miss would leave a sensitive repo's review on its override.
+  LC_ALL=C grep -aEi '^[^a-z]*factory[-_]?sensitive' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
   if [ -s "$tmp/bad" ]; then printf '%s\n' "CLAUDE.md line [$(LC_ALL=C sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
   seen=' '
   while IFS= read -r ml; do
     ml=$(printf '%s' "$ml" | LC_ALL=C sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     ms=''
-    if printf '%s\n' "$ml" | LC_ALL=C grep -aEq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex)/[A-Za-z0-9._-]+$'; then
+    if printf '%s\n' "$ml" | LC_ALL=C grep -aEq '^factory-model\.[a-z]+:[[:space:]]*(claude|codex|antigravity)/[A-Za-z0-9._-]+$'; then
       ms=${ml#factory-model.}
       ms=${ms%%:*}
     fi
     case "$ms" in
       intake | plan | build | review | verify | debrief) ;;
-      *) printf '%s\n' "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex>/<model>"; return 1 ;;
+      *) printf '%s\n' "CLAUDE.md line [$ml] is not factory-model.<intake|plan|build|review|verify|debrief>: <claude|codex|antigravity>/<model>"; return 1 ;;
     esac
     case "$seen" in *" $ms "*) printf '%s\n' "CLAUDE.md line [$ml] repeats factory-model.$ms"; return 1 ;; esac
     seen="$seen$ms "

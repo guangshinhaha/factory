@@ -17,9 +17,10 @@ Set in the target repo's CLAUDE.md, on its default branch. `sf-init` adds `facto
 - `factory-sensitive: true|false`: with `true`, review stays on Claude (`claude/opus`) and ignores any
   `factory-model.review` line.
 - `factory-model.<station>: <agent>/<model>`: overrides a station's worker. Stations: `intake`, `plan`,
-  `build`, `review`, `verify`, `debrief`. Agents: `claude`, `codex`. Not added by `sf-init`. Defaults
+  `build`, `review`, `verify`, `debrief`. Agents: `claude`, `codex`, `antigravity` (the model is the exact id T3 lists, e.g.
+  `antigravity/gemini-4-hydrogen`; the repo's code then goes to that provider). Not added by `sf-init`. Defaults
   (in `bin/sf-act`): intake `claude/sonnet`, plan `claude/opus`, build `claude/sonnet`, review
-  `codex/codex-auto-review`, verify `claude/opus`, debrief `claude/haiku`. A malformed or repeated line,
+  `claude/opus`, verify `claude/opus`, debrief `claude/haiku`. A malformed or repeated line,
   or an unknown station or agent, stops the issue naming the line.
 
 In the environment: `FACTORY_MAX_RUNS` also caps the repo's live Runs (default 4); the lower of the two caps wins.

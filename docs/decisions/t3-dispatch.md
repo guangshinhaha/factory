@@ -37,7 +37,12 @@ shell scripts keep deciding and gating, and an agent session does the dispatchin
    the round limit, "merge only on a green gate with `--match-head-commit`".
 5. **Cleanup** (closed issue, Run over): `sf-act` emits a `cleanup` request with the worktree path;
    the script has already removed the worktree and merged branch; the foreman only archives the listed threads.
-6. **Review model.** The review station runs as a T3 child on a Codex model where the host offers one.
+6. **Review model.** Default `claude/opus` since 2026-11-26: the owner has no Codex access, and
+   `codex-auto-review` is not a model T3 lists (#128). A repo picks another reviewer with
+   `factory-model.review`, including `antigravity/<model>`. Another provider is opt-in per repo,
+   never a default: plugin updates reach every repo unattended, so a default would send each
+   repo's code to that provider without a per-repo choice. The foreman never moves a request to
+   another provider.
 7. **The run cap is per repo.** Records are one repo's comments, so `FACTORY_MAX_RUNS` caps that repo's
    live Runs; there is no cap across repos and no `sf-tick` host lock. Intended: each repo has its own
    schedule, and the schedule never overlaps itself.
@@ -116,7 +121,3 @@ have no worktree row, so any finished intake or plan thread escalates instead.
 1. Seam in `lib/orch.sh` (#114). 2. This doc. 3. Markers and the thread snapshot in `sf-state`, with fakes.
 4. `factory:foreman` skill and the T3 scheduled task in `sf-init`. 5. Station skills and brief:
 "Runs as: T3 child", result by thread read. 6. Delete Orca, update docs and metadata, release 0.4.0.
-
-## Open
-
-- How the review station gets a Codex model when the host has none (fall back to Opus, say so in the comment).
