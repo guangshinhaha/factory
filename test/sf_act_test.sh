@@ -117,7 +117,7 @@ test_gate_pass_opens_a_draft_pr_and_queues_review_verify_and_ship() {
   assert_called "gh pr create -R acme/app --draft --head app-7 --base main --title Greet people --body-file -"
   assert_contains "$(fake_stdin)" "Closes #7"
   assert_eq completed "$(status_of gate)" "gate"
-  assert_eq codex/codex-auto-review "$(agent_of review)" "review agent"
+  assert_eq claude/opus "$(agent_of review)" "review agent"
   assert_contains "$(spec_of review)" "PR #12"
   assert_eq pending "$(status_of verify)" "verify"
   assert_eq pending "$(status_of ship)" "ship"
@@ -700,6 +700,45 @@ test_factory_sensitive_forces_review_onto_claude_over_any_review_line() {
   to_review
   assert_eq claude/opus "$(agent_of review)" "review agent"
 }
+
+test_a_factory_model_line_puts_review_on_antigravity() {
+  world
+  claude_md "$(printf 'factory-model.review: antigravity/gemini-4-hydrogen')"
+  to_review
+  assert_eq antigravity/gemini-4-hydrogen "$(agent_of review)" "review agent"
+}
+
+test_factory_sensitive_keeps_review_on_claude_over_an_antigravity_line() {
+  world
+  claude_md "$(printf 'factory-sensitive: true\nfactory-model.review: antigravity/gemini-4-hydrogen')"
+  to_review
+  assert_eq claude/opus "$(agent_of review)" "review agent"
+}
+
+test_an_antigravity_review_that_fails_to_start_is_never_recorded_as_not_run() {
+  world
+  claude_md "$(printf 'factory-model.review: antigravity/gemini-4-hydrogen')"
+  to_build
+  echo "PASS" | fixture gantry-gate-evidence --force-with-lease
+  open_pr_seq app-7 '' 12
+  fixture gh pr create -R "$REPO" --draft --head app-7 --base main --title "Greet people" --body-file - < /dev/null
+  finish build "$BUILT"
+  comment_fails dispatch "antigravity: not logged in"
+  act
+  assert_eq ready "$(status_of review)" "review"
+  assert_eq 0 "$(count_calls 'gh pr comment')" "not-run comments"
+}
+
+# antigravity_hold <message>: a start that fails with it holds the issue for antigravity.
+antigravity_hold() {
+  world
+  claude_md "$(printf 'factory-model.intake: antigravity/gemini-4-hydrogen')"
+  comment_fails dispatch "$1"
+  act
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " antigravity "
+}
+test_an_antigravity_resource_exhausted_error_holds() { antigravity_hold 'RESOURCE_EXHAUSTED: try later'; }
+test_an_antigravity_429_status_holds() { antigravity_hold 'request failed with status 429'; }
 
 test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run() {
   world
