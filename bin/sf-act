@@ -102,8 +102,8 @@ js() {
 # The first 400 bytes of stdin, for a result reason.
 clip() { dd bs=400 count=1 2> /dev/null; }
 
-# Usage-limit wording from Claude Code, Codex and Antigravity.
-LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many requests|try again (at|in)|resource[ _]exhausted|(status|code|error|http)[^0-9a-z]{0,4}429([^0-9]|$)'
+# Usage-limit wording. It is matched against a worker's own text too, so no bare codes like 429.
+LIMIT_RE='usage limit|rate limit|limit reached|hit your limit|quota|too many requests|try again (at|in)'
 
 # ---- Runs and tasks -------------------------------------------------------------------------
 
@@ -525,9 +525,9 @@ model_for() {
   git -C "$main" show "$mdef:CLAUDE.md" > "$tmp/claude.raw" 2> /dev/null || : > "$tmp/claude.raw"
   LC_ALL=C tr -d '\r' < "$tmp/claude.raw" > "$tmp/claude.md" || { echo "CLAUDE.md on $mdef not read"; return 2; }
   # Anything that starts like a factory-model key (a missing dot, another case, a bullet) is held to the strict form.
-  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
+  LC_ALL=C grep -aEi '^[^a-z]*factory[-_]?model' "$tmp/claude.md" > "$tmp/models" || :
   # Same for factory-sensitive: a near-miss would leave a sensitive repo's review on its override.
-  LC_ALL=C grep -aEi '^[^a-z0-9]*factory[-_]?sensitive' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
+  LC_ALL=C grep -aEi '^[^a-z]*factory[-_]?sensitive' "$tmp/claude.md" | LC_ALL=C grep -aEv '^[[:space:]]*factory-sensitive:[[:space:]]*(true|false)[[:space:]]*$' > "$tmp/bad" || :
   if [ -s "$tmp/bad" ]; then printf '%s\n' "CLAUDE.md line [$(LC_ALL=C sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' "$tmp/bad")] is not factory-sensitive: <true|false>"; return 1; fi
   seen=' '
   while IFS= read -r ml; do

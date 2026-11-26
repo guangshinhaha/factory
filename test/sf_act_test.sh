@@ -744,8 +744,43 @@ antigravity_hold() {
   act
   assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " antigravity "
 }
-test_an_antigravity_resource_exhausted_error_holds() { antigravity_hold 'RESOURCE_EXHAUSTED: try later'; }
-test_an_antigravity_429_status_holds() { antigravity_hold 'request failed with status 429'; }
+test_an_antigravity_quota_error_holds() { antigravity_hold 'Resource has been exhausted (e.g. check quota)'; }
+
+# rejected <body>: the foreman's failed result for the review dispatch the host would not take.
+rejected() {
+  result_marker "$(dispatch_of review)" "$1" failed
+  acts
+}
+antigravity_review() {
+  world
+  claude_md 'factory-model.review: antigravity/gemini-4-hydrogen'
+  to_review
+}
+
+test_a_failed_worker_that_only_mentions_429_is_not_held() {
+  antigravity_review
+  rejected 'Tests fail: the client should retry on status 429 or RESOURCE_EXHAUSTED, but the PR drops it.'
+  assert_eq 0 "$(count_calls sf-hold)" "holds"
+  assert_eq 1 "$(count_calls sf-stop)" "stops"
+}
+test_a_rejected_dispatch_stops_for_a_person() {
+  antigravity_review
+  rejected 'delegate_task rejected: provider antigravity is not available'
+  assert_eq 0 "$(count_calls sf-hold)" "holds"
+  assert_eq 1 "$(count_calls sf-stop)" "stops"
+}
+test_a_rejected_dispatch_at_a_quota_holds_its_provider() {
+  antigravity_review
+  rejected 'delegate_task rejected: quota exceeded'
+  assert_contains "$(grep '^sf-hold' "$FAKE_LOG")" " antigravity "
+}
+test_a_numbered_factory_sensitive_line_never_leaves_review_on_antigravity() {
+  world
+  claude_md "$(printf '1. factory-sensitive: true\nfactory-model.review: antigravity/gemini-4-hydrogen')"
+  act
+  assert_contains "$(grep '^sf-stop' "$FAKE_LOG")" "is not factory-sensitive"
+  assert_eq "" "$(requests_of dispatch)" "workers"
+}
 
 test_a_sensitive_review_that_fails_to_start_is_never_recorded_as_a_codex_not_run() {
   world
