@@ -5,6 +5,9 @@
 # shellcheck source=test/act_world.sh
 . "$FACTORY_ROOT/test/act_world.sh"
 
+# codex_review: the repo opts review back onto Codex.
+codex_review() { claude_md 'factory-model.review: codex/codex-auto-review'; }
+
 test_a_fresh_issue_gets_an_attempt_marker_then_one_run_with_intake_and_route() {
   world
   acts
@@ -145,6 +148,7 @@ EOF
 
 test_review_without_codex_posts_not_run_and_verify_starts() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -166,6 +170,7 @@ test_review_without_codex_posts_not_run_and_verify_starts() {
 
 test_review_at_a_codex_usage_limit_holds() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -180,6 +185,7 @@ test_review_at_a_codex_usage_limit_holds() {
 
 test_review_that_fails_to_start_otherwise_stops() {
   world
+  codex_review
   to_build
   echo "PASS" | fixture gantry-gate-evidence --force-with-lease
   open_pr_seq app-7 '' 12
@@ -282,6 +288,7 @@ test_a_station_agent_that_failed_without_reporting_is_retried_once_then_stopped(
 
 test_a_station_agent_that_failed_at_a_usage_limit_is_held_not_retried() {
   world
+  codex_review
   to_review
   agent_ended failed 'Codex usage limit reached. Try again at Dec 15th.'
   acts
