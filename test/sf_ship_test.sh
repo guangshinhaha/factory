@@ -648,6 +648,101 @@ test_a_repo_with_no_checks_at_all_merges() {
   assert_eq "MERGED abc123" "$(last_line)" "result"
 }
 
+# ---- a base branch with no required checks (#135) ------------------------------------------------
+
+# no_required: gh's reply when the base requires nothing, whether or not the repo has CI.
+no_required() {
+  fixture gh pr checks 9 -R "$REPO" --required --json name,bucket < /dev/null
+  fixture_exit 1 "no required checks reported on the 'app-7' branch"
+}
+all_checks() { printf '%s\n' "$1" | fixture gh pr checks 9 -R "$REPO" --json name,bucket; }
+# with_ci: the PR head has a CI workflow.
+with_ci() {
+  mkdir -p .github/workflows
+  commit .github/workflows/ci.yml 'on: pull_request'
+  git_q push origin app-7
+  HEAD_SHA=$(git rev-parse HEAD)
+  pr OPEN false MERGEABLE CLEAN
+  reviewed "$(review_comment OWNER "$HEAD_SHA")"
+  fixture gh pr merge 9 -R "$REPO" --squash --match-head-commit "$HEAD_SHA" < /dev/null
+}
+
+test_failed_check_stops_when_nothing_is_required() {
+  world auto
+  pr OPEN false MERGEABLE UNSTABLE
+  no_required
+  all_checks '[{"name":"check","bucket":"fail"}]'
+  ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_eq "STOPPED: checks failed on PR #9: check" "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_pending_check_waits_when_nothing_is_required() {
+  world auto
+  pr OPEN false MERGEABLE UNSTABLE
+  no_required
+  all_checks '[{"name":"check","bucket":"pending"}]'
+  SF_SHIP_WAIT=0 ship_status
+  assert_eq 2 "$status" "exit status"
+  assert_eq "RETRY: PR #9 still pending after 0s: check" "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_blocked_pr_with_a_pending_optional_check_never_merges_at_the_deadline() {
+  world auto
+  pr OPEN false MERGEABLE BLOCKED
+  no_required
+  all_checks '[{"name":"check","bucket":"pending"}]'
+  SF_SHIP_WAIT=0 ship_status
+  assert_eq 2 "$status" "exit status"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_green_checks_merge_when_nothing_is_required() {
+  world auto
+  pr_seq 1 OPEN false MERGEABLE CLEAN
+  pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
+  no_required
+  all_checks '[{"name":"check","bucket":"pass"},{"name":"optional","bucket":"skipping"}]'
+  ship_status
+  assert_status0 "$status" "exit status" "$TEST_TMP/err"
+  assert_eq "MERGED abc123" "$(last_line)" "result"
+}
+
+test_unreadable_checks_are_retried_when_nothing_is_required() {
+  world auto
+  no_required
+  fixture gh pr checks 9 -R "$REPO" --json name,bucket < /dev/null
+  fixture_exit 1 "HTTP 502"
+  ship_status
+  assert_eq 2 "$status" "exit status"
+  assert_contains "$(last_line)" "RETRY: checks of PR #9 not read: HTTP 502"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_ci_workflow_with_no_check_reported_stops_after_the_wait() {
+  world auto
+  with_ci
+  no_required
+  fixture gh pr checks 9 -R "$REPO" --json name,bucket < /dev/null
+  fixture_exit 1 "no checks reported on the 'app-7' branch"
+  SF_SHIP_WAIT=0 ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_eq "STOPPED: no CI check passed on PR #9 after 0s, though its head has .github/workflows/ci.yml" "$(last_line)" "result"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
+test_ci_workflow_with_only_skipped_checks_is_not_green() {
+  world auto
+  with_ci
+  no_required
+  all_checks '[{"name":"check","bucket":"skipping"}]'
+  SF_SHIP_WAIT=0 ship_status
+  assert_eq 1 "$status" "exit status"
+  assert_eq 0 "$(count_calls "gh pr merge")" "merge calls"
+}
+
 # ---- consult-shin (#36) ----------------------------------------------------------------------------
 
 # issue_labels <csv>: every read of issue #7's labels.
