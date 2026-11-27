@@ -55,6 +55,11 @@ reviewed() {
   printf '[%s]\n' "$(printf '%s\n' "$@" | paste -sd , -)" | fixture gh api "repos/$REPO/issues/9/comments" --paginate
 }
 checks() { printf '%s\n' "$1" | fixture gh pr checks 9 -R "$REPO" --required --json name,bucket; }
+# nothing_reported: the unfiltered check read of a PR with no check yet.
+nothing_reported() {
+  fixture gh pr checks 9 -R "$REPO" --json name,bucket < /dev/null
+  fixture_exit 1 "no checks reported on the 'app-7' branch"
+}
 timeline() { printf '%s\n' "$1" | fixture gh api "repos/$REPO/issues/7/timeline" --paginate; }
 ci_runs() { printf '%s\n' "$1" | fixture gh run list -R "$REPO" --workflow ci.yml --commit "$HEAD_SHA" --limit 20 --json databaseId,attempt,status,conclusion; }
 sf_ship() { sh "$FACTORY_ROOT/bin/sf-ship" --repo "$REPO" 7 9; }
@@ -241,6 +246,7 @@ test_pending_checks_wait_then_merge() {
 
 test_checks_not_reported_yet_count_as_pending() {
   world auto
+  nothing_reported
   pr_seq 1 OPEN false MERGEABLE BLOCKED
   pr_seq 3 OPEN false MERGEABLE CLEAN
   pr_seq 4 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
@@ -255,6 +261,7 @@ test_checks_not_reported_yet_count_as_pending() {
 
 test_blocked_with_no_required_checks_lets_gh_decide_after_the_wait() {
   world auto
+  nothing_reported
   pr OPEN false MERGEABLE BLOCKED
   fixture gh pr checks 9 -R "$REPO" --required --json name,bucket < /dev/null
   fixture_exit 1 "no required checks reported on the 'app-7' branch"
@@ -638,6 +645,7 @@ test_comment_without_a_findings_line_is_not_a_review() {
 # Seen in the e2e (#7): a repo with no CI has no checks at all; that must not retry forever.
 test_a_repo_with_no_checks_at_all_merges() {
   world auto
+  nothing_reported
   pr_seq 1 OPEN false MERGEABLE CLEAN
   pr_seq 3 MERGED false MERGEABLE CLEAN "$HEAD_SHA" abc123
   fixture gh pr checks 9 -R "$REPO" --required --json name,bucket < /dev/null

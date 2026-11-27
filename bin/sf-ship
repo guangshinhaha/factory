@@ -19,9 +19,12 @@
 #     auto): `shinstack-mode: auto` merges, unless `shinstack-mode.merge: ask`;
 #     `shinstack-mode.merge: auto` merges in any mode. Otherwise: `gh pr ready`, exit 0.
 #  5. Marks the PR ready, then waits up to SF_SHIP_WAIT seconds (default 600), polling every
-#     SF_SHIP_POLL (default 30), while mergeability is UNKNOWN or required checks are pending.
-#     A failed required check stops. Still BLOCKED with no required checks reported when the wait
-#     runs out: try the merge, so gh's refusal (a required review, say) stops.
+#     SF_SHIP_POLL (default 30), while mergeability is UNKNOWN or checks are pending. The
+#     required checks gate; where none are required (or none has reported), every check does.
+#     A failed or cancelled one stops. With none required and a .github/workflows/ci.yml at the
+#     head, a check must pass: none by the end of the wait stops. Otherwise, still BLOCKED with no
+#     required checks reported when the wait runs out: try the merge, so gh's refusal (a required
+#     review, say) stops.
 #  6. Conflicting or behind its base: the first time since the issue was last labelled ready,
 #     rebase onto origin/<base> (never merge), push through `gantry-gate-evidence
 #     --force-with-lease`, comment a rebase marker on the issue, exit 3 so review and verify
@@ -216,8 +219,20 @@ if [ "$auto_merge" = 0 ]; then
 fi
 
 # --- 5. Wait for checks ------------------------------------------------------------------------
+# read_checks <file> [--required]: the PR's checks as a JSON array in <file>; none reported is [].
+read_checks() {
+  out=$1
+  shift
+  : > "$tmp/checks.err"
+  gh pr checks "$pr" -R "$repo" "$@" --json name,bucket > "$out" 2> "$tmp/checks.err" || :
+  jq -es 'length == 1 and (.[0] | type == "array")' "$out" > /dev/null 2>&1 && return 0
+  grep -Eq 'no (required )?checks reported' "$tmp/checks.err" \
+    || retry "${1:+required }checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
+  echo '[]' > "$out"
+}
+
 # wait_mergeable: returns 0 to merge, 3 on a conflict; stops on a failed check; retries when the
-# wait runs out.
+# wait runs out. The required checks gate; where the base requires none, every check does (#135).
 wait_mergeable() {
   deadline=$(($(date +%s) + wait_s))
   while :; do
@@ -229,34 +244,33 @@ wait_mergeable() {
       CONFLICTING:* | *:DIRTY | *:BEHIND) return 3 ;;
     esac
 
-    : > "$tmp/checks.err"
-    gh pr checks "$pr" -R "$repo" --required --json name,bucket > "$tmp/checks" 2> "$tmp/checks.err" || :
-    # One jq reads one document that is an array: the failed and the pending names (the trailing newlines
-    # $(...) would drop are dropped here). Anything else takes the slow path, which names it.
-    ck_fast=$(jq -rs 'if length == 1 and (.[0] | type == "array") then .[0]
-      | @sh "failed=\([.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ") | sub("\n+$"; "")) pending=\([.[] | select(.bucket == "pending") | .name] | join(", ") | sub("\n+$"; ""))"
-      else empty end' "$tmp/checks" 2> /dev/null) || ck_fast=''
-    if [ -n "$ck_fast" ]; then
-      eval "${ck_fast%"$cr"}"
-      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
-    else
-      if ! jq -e 'type == "array"' "$tmp/checks" > /dev/null 2>&1; then
-        # A repo with no CI at all says `no checks reported`: no required check gates it either.
-        if grep -Eq 'no (required )?checks reported' "$tmp/checks.err"; then
-          echo '[]' > "$tmp/checks"
-        else
-          retry "required checks of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
-        fi
-      fi
-      failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' "$tmp/checks")
-      failed=${failed%"$cr"}
-      [ -z "$failed" ] || stop "required checks failed on PR #$pr: $failed"
-      pending=$(jq -r '[.[] | select(.bucket == "pending") | .name] | join(", ")' "$tmp/checks")
-      pending=${pending%"$cr"}
+    read_checks "$tmp/required" --required
+    gate=$tmp/required
+    kind="required checks"
+    none_required=0
+    if jq -e 'length == 0' "$tmp/required" > /dev/null; then
+      # gh says `no required checks reported` also for a repo whose CI is red but not required.
+      none_required=1
+      gate=$tmp/all
+      kind=checks
+      read_checks "$gate"
     fi
+    # Assigns the failed and pending names, and whether any check passed.
+    failed='' pending='' passed=''
+    ck=$(jq -r 'def names(f): [.[] | select(f) | .name] | join(", ") | sub("\n+$"; "");
+      @sh "failed=\(names(.bucket == "fail" or .bucket == "cancel")) pending=\(names(.bucket == "pending")) passed=\(any(.[]; .bucket == "pass"))"' "$gate" \
+      || retry "$kind of PR #$pr not read: gh pr checks printed an unexpected shape")
+    eval "${ck%"$cr"}"
+    [ -z "$failed" ] || stop "$kind failed on PR #$pr: $failed"
+    unreported=0
     if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
       pending="${pending:+$pending, }mergeability"
-    elif [ "$merge_state" = BLOCKED ] && jq -e 'length == 0' "$tmp/checks" > /dev/null; then
+    elif [ -z "$pending" ] && [ "$none_required" = 1 ] && [ "$passed" = false ] \
+      && git cat-file -e "$start_head:.github/workflows/ci.yml" 2> /dev/null; then
+      # CI that has not started, or only skipped, proves nothing about this head.
+      unreported=1
+      pending="a passing CI check"
+    elif [ -z "$pending" ] && [ "$merge_state" = BLOCKED ] && [ "$none_required" = 1 ]; then
       pending="required checks not reported yet"
     fi
     [ -n "$pending" ] || return 0
@@ -265,6 +279,7 @@ wait_mergeable() {
       # BLOCKED with no required checks will not change by waiting (a required review, say):
       # let gh decide, so a refusal stops instead of retrying every fire.
       [ "$pending" = "required checks not reported yet" ] && return 0
+      [ "$unreported" = 0 ] || stop "no CI check passed on PR #$pr after ${wait_s}s, though its head has .github/workflows/ci.yml"
       retry "PR #$pr still pending after ${wait_s}s: $pending"
     fi
     echo "$me: waiting on $pending" >&2
