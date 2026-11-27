@@ -21,10 +21,11 @@
 #  5. Marks the PR ready, then waits up to SF_SHIP_WAIT seconds (default 600), polling every
 #     SF_SHIP_POLL (default 30), while mergeability is UNKNOWN or checks are pending. The
 #     required checks gate; where none are required (or none has reported), every check does.
-#     A failed or cancelled one stops. With none required and a .github/workflows/ci.yml at the
-#     head, a check must pass: none by the end of the wait stops. Otherwise, still BLOCKED with no
-#     required checks reported when the wait runs out: try the merge, so gh's refusal (a required
-#     review, say) stops.
+#     A failed or cancelled one stops (while BLOCKED with none required: only when the wait runs
+#     out). With none required and a ci.yml at the head that runs on pull requests, ci.yml needs a
+#     successful run at the head: none by the end of the wait stops. Otherwise, still BLOCKED with
+#     no required checks reported when the wait runs out: try the merge, so gh's refusal (a
+#     required review, say) stops.
 #  6. Conflicting or behind its base: the first time since the issue was last labelled ready,
 #     rebase onto origin/<base> (never merge), push through `gantry-gate-evidence
 #     --force-with-lease`, comment a rebase marker on the issue, exit 3 so review and verify
@@ -231,6 +232,12 @@ read_checks() {
   echo '[]' > "$out"
 }
 
+# ci_on_prs: the PR head has a .github/workflows/ci.yml with a pull_request trigger.
+ci_on_prs() {
+  git show "$start_head:.github/workflows/ci.yml" 2> /dev/null \
+    | grep -Eq '^[[:space:]]*(-[[:space:]]*)?pull_request(_target)?[[:space:]]*(:|$)|^on:.*[^._]pull_request'
+}
+
 # wait_mergeable: returns 0 to merge, 3 on a conflict; stops on a failed check; retries when the
 # wait runs out. The required checks gate; where the base requires none, every check does (#135).
 wait_mergeable() {
@@ -255,31 +262,48 @@ wait_mergeable() {
       kind=checks
       read_checks "$gate"
     fi
-    # Assigns the failed and pending names, and whether any check passed.
-    failed='' pending='' passed=''
+    # Assigns the failed and pending names. `|| retry` stays outside $( ): inside, its exit only
+    # leaves the subshell.
     ck=$(jq -r 'def names(f): [.[] | select(f) | .name] | join(", ") | sub("\n+$"; "");
-      @sh "failed=\(names(.bucket == "fail" or .bucket == "cancel")) pending=\(names(.bucket == "pending")) passed=\(any(.[]; .bucket == "pass"))"' "$gate" \
-      || retry "$kind of PR #$pr not read: gh pr checks printed an unexpected shape")
+      @sh "failed=\(names(.bucket == "fail" or .bucket == "cancel")) pending=\(names(.bucket == "pending"))"' "$gate" 2> "$tmp/checks.err") \
+      || retry "$kind of PR #$pr not read: $(tr '\n' ' ' < "$tmp/checks.err")"
     eval "${ck%"$cr"}"
-    [ -z "$failed" ] || stop "$kind failed on PR #$pr: $failed"
-    unreported=0
+    # BLOCKED with none required may only mean the required checks have not reported yet, so a red
+    # check waits for them instead of stopping at once. It still never merges (see the deadline).
+    waits_for_required=0
+    if [ "$none_required" = 1 ] && [ "$merge_state" = BLOCKED ]; then
+      waits_for_required=1
+    fi
+    [ -z "$failed" ] || [ "$waits_for_required" = 1 ] || stop "$kind failed on PR #$pr: $failed"
+
+    # With nothing required, other checks can be green while CI is skipped (a draft run) or not
+    # started, so ci.yml itself must have a successful run at this head.
+    ci=proven
+    if [ "$none_required" = 1 ] && [ -z "$failed" ] && ci_on_prs; then
+      gh run list -R "$repo" --workflow ci.yml --commit "$start_head" --limit 20 --json databaseId,attempt,status,conclusion > "$tmp/ci" 2> "$tmp/checks.err" \
+        || retry "ci runs of $start_head not listed: $(tr '\n' ' ' < "$tmp/checks.err")"
+      ci=$(jq -r 'if any(.[]; .status != "completed") then "running" elif any(.[]; .conclusion == "success") then "proven" else "none" end' "$tmp/ci" 2> /dev/null) \
+        || retry "ci runs of $start_head not listed: gh run list printed no JSON array"
+      ci=${ci%"$cr"}
+    fi
+
     if [ "$mergeable" = UNKNOWN ] || [ "$merge_state" = UNKNOWN ]; then
       pending="${pending:+$pending, }mergeability"
-    elif [ -z "$pending" ] && [ "$none_required" = 1 ] && [ "$passed" = false ] \
-      && git cat-file -e "$start_head:.github/workflows/ci.yml" 2> /dev/null; then
-      # CI that has not started, or only skipped, proves nothing about this head.
-      unreported=1
-      pending="a passing CI check"
-    elif [ -z "$pending" ] && [ "$merge_state" = BLOCKED ] && [ "$none_required" = 1 ]; then
+    elif [ -z "$pending" ] && [ "$ci" = running ]; then
+      pending="ci.yml run"
+    elif [ -z "$pending" ] && [ "$ci" = none ]; then
+      pending="a successful ci.yml run"
+    elif [ -z "$pending" ] && [ "$waits_for_required" = 1 ]; then
       pending="required checks not reported yet"
     fi
     [ -n "$pending" ] || return 0
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
+      [ -z "$failed" ] || stop "$kind failed on PR #$pr: $failed"
       # BLOCKED with no required checks will not change by waiting (a required review, say):
       # let gh decide, so a refusal stops instead of retrying every fire.
       [ "$pending" = "required checks not reported yet" ] && return 0
-      [ "$unreported" = 0 ] || stop "no CI check passed on PR #$pr after ${wait_s}s, though its head has .github/workflows/ci.yml"
+      [ "$pending" != "a successful ci.yml run" ] || stop "no successful ci.yml run for PR #$pr head after ${wait_s}s"
       retry "PR #$pr still pending after ${wait_s}s: $pending"
     fi
     echo "$me: waiting on $pending" >&2
