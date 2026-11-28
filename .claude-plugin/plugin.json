@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Software factory on T3 Code: turns ready GitHub issues into reviewed, merged PRs. Skills hold judgment; POSIX sh gate scripts hold evidence, merge safety and stop.",
   "author": { "name": "guangshinhaha" },
   "repository": "https://github.com/guangshinhaha/factory",
