@@ -1,0 +1,156 @@
+#!/bin/sh
+# sf-triage: what the owner has not been asked about yet (#127). It reads only; the one thing it
+# writes is the record that a batch was sent. It never labels or edits an issue.
+# Usage: sf-triage owner/repo
+#          prints {"send":bool,"untriaged":[{number,title,url,trusted}],"stale":[{number,title,url,pr}],
+#          "new":{"untriaged":[N],"stale":[N]},"title":"owner/repo triage batch <key>"}
+#        sf-triage list owner/repo
+#          the same, without asking sf-state: send is always false and no thread snapshot is needed
+#        sf-triage sent owner/repo '<the "new" object>'
+#          posts one `triage-sent` marker comment naming them all (on the first), so it can't half-fail
+#
+# untriaged  open issues with none of ready, needs-shin, icebox, epic. trusted is false for an
+#            author who is not OWNER, MEMBER or COLLABORATOR: triage never reads that body.
+# stale      open `ready` issues with a PR from their branch (`<repo>-N` or `<repo>-N-*`, never a
+#            fork) merged since the last `ready` label or reopen.
+# new        the entries no marker names yet (a stale one: none since that label or reopen).
+# title      the batch thread's name: the same while `new` is the same, and different when an
+#            issue goes stale again, so an old batch's thread is never taken for this one's.
+# send       new is not empty, the factory has a free slot and sf-state starts nothing.
+#
+# State is those markers on GitHub: a batch is sent again only when an issue joins a list.
+# Run from the repo's checkout with the foreman's FACTORY_T3_THREADS set (sf-state needs it).
+# Exit 0: JSON on stdout (or markers posted). 1: a read or write failed, nothing on stdout.
+# 2: bad arguments.
+set -u
+
+me=sf-triage
+root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/factory.sh
+. "$root/lib/factory.sh"
+need_jq
+
+usage="usage: sf-triage [list] owner/repo | sf-triage sent owner/repo '<new json>'"
+mode=scan want=1
+case "${1:-}" in
+  sent) mode=sent want=2; shift ;;
+  list) mode=list; shift ;;
+esac
+[ $# -eq "$want" ] || usage_error "$usage"
+repo=$1
+case "$repo" in
+  */*) ;;
+  *) usage_error "repo [$repo] is not owner/repo" ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-triage.XXXXXX") || die "temp dir not created"
+trap 'rm -rf "$tmp"' EXIT
+
+if [ "$mode" = sent ]; then
+  # Two lines, the host issue and the marker, only from exactly two arrays of whole numbers.
+  printf '%s' "$2" | jq -rs '
+    def nums: type == "array" and all(.[]; type == "number" and . == floor and . >= 1 and . <= 9007199254740991);
+    if length == 1 and (.[0] | type == "object" and keys == ["stale","untriaged"] and (.untriaged | nums) and (.stale | nums))
+    then .[0] | select((.untriaged + .stale | length) > 0)
+      | "\((.untriaged + .stale)[0])", ({kind: "triage-sent", untriaged, stale} | tojson)
+    else error("shape") end' > "$tmp/sent" 2> /dev/null \
+    || usage_error "not a {\"untriaged\":[N],\"stale\":[N]} object: [$2]"
+  n='' marker=''
+  { IFS= read -r n && IFS= read -r marker; } < "$tmp/sent" || :
+  if [ -n "$n" ]; then
+    printf 'factory: sent to you for triage.\n\n<!-- factory:%s -->\n' "${marker%"$cr"}" \
+      | gh issue comment "${n%"$cr"}" -R "$repo" --body-file - > /dev/null \
+      || die "triage-sent marker not posted on #${n%"$cr"}"
+  fi
+  exit 0
+fi
+
+# pages <file>: a paginated REST read is one or more arrays of objects, and nothing else.
+pages() {
+  jq -cs 'if length > 0 and all(.[]; type == "array") then add else error("shape") end
+    | if all(.[]; type == "object") then . else error("shape") end' "$1" 2> /dev/null
+}
+
+# REST, not `gh issue list`: it carries author_association, and never uses the search API.
+gh api "repos/$repo/issues?state=open&per_page=100" --paginate > "$tmp/issues.raw" \
+  || die "open issues not listed (gh api failed)"
+pages "$tmp/issues.raw" > "$tmp/issues.json" || die "open issues not listed: gh api printed no JSON array"
+
+gh pr list -R "$repo" --state merged --limit 200 --json number,headRefName,mergedAt,isCrossRepository > "$tmp/merged.raw" \
+  || die "merged PRs not listed (gh pr list failed)"
+jq -cs 'if length == 1 and (.[0] | type == "array") then .[0] else error("shape") end' "$tmp/merged.raw" > "$tmp/merged.json" 2> /dev/null \
+  || die "merged PRs not listed: gh pr list printed no single JSON array"
+
+# Lists from the open issues. A candidate's PR still has to be newer than its last `ready` label.
+jq -c --slurpfile merged "$tmp/merged.json" --arg name "${repo#*/}" '
+  [.[] | select(has("pull_request") | not) | . + {l: [.labels[].name]}] as $open
+  | {
+      untriaged: [$open[] | select([.l[] | select(. == "ready" or . == "needs-shin" or . == "icebox" or . == "epic")] | length == 0)
+        | {number, title, url: .html_url,
+           trusted: (.author_association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) != null)}]
+        | sort_by(.number),
+      candidates: [$open[] | select((.l | index("ready")) and (.l | index("needs-shin") | not) and (.l | index("icebox") | not))
+        | "\($name)-\(.number)" as $b
+        | [$merged[0][] | select(.isCrossRepository == false)
+            | select((.headRefName | split("/") | last) as $h | $h == $b or ($h | startswith("\($b)-")))] as $prs
+        | select($prs | length > 0)
+        | ($prs | max_by(.mergedAt)) as $pr
+        | {number, title, url: .html_url, pr: $pr.number, merged_at: $pr.mergedAt}]
+        | sort_by(.number)
+    }' "$tmp/issues.json" > "$tmp/lists.json" 2> /dev/null || die "open issues not read: unexpected shape"
+
+: > "$tmp/stale.jsonl"
+jq -r '.candidates[].number' "$tmp/lists.json" > "$tmp/candidates" || die "stale candidates not read"
+while read -r n; do
+  n=${n%"$cr"}
+  gh api "repos/$repo/issues/$n/timeline" --paginate > "$tmp/timeline.raw" || die "timeline of #$n not read (gh api failed)"
+  pages "$tmp/timeline.raw" > "$tmp/timeline.json" || die "timeline of #$n not read: gh api printed no JSON array"
+  # UTC ISO-8601 from one source, so the strings order as the times do.
+  jq -c --argjson n "$n" --slurpfile t "$tmp/timeline.json" '
+    .candidates[] | select(.number == $n)
+    | ([$t[0][] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max) as $readied
+    | if $readied == null then error("no ready event") else . end
+    # A reopen starts afresh, as sf-state counts it.
+    | ([$readied, ($t[0][] | select(.event == "reopened") | .created_at)] | max) as $since
+    | select(.merged_at > $since) | {number, title, url, pr, since: $since}' "$tmp/lists.json" >> "$tmp/stale.jsonl" 2> /dev/null \
+    || die "timeline of #$n has no ready label event"
+done < "$tmp/candidates"
+
+# Every comment on the repo in one read, for the markers.
+gh api "repos/$repo/issues/comments?per_page=100" --paginate > "$tmp/comments.raw" || die "comments not listed (gh api failed)"
+pages "$tmp/comments.raw" > "$tmp/comments.json" || die "comments not listed: gh api printed no JSON array"
+
+jq -c --slurpfile stale "$tmp/stale.jsonl" --slurpfile comments "$tmp/comments.json" '
+  # As sf-state reads markers: people with write access only, last non-empty line only.
+  [$comments[0][]
+    | select(.author_association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a))
+    | .created_at as $at
+    | (.body // "" | split("\n") | map(rtrimstr("\r") | select(test("\\S"))) | last // "")
+    | scan("^<!-- factory:(\\{.*\\}) -->$") | .[0] | (try fromjson catch empty)
+    | select(type == "object" and .kind == "triage-sent")
+    | ((.untriaged | arrays | .[] | {n: ., list: "untriaged"}), (.stale | arrays | .[] | {n: ., list: "stale"}))
+    | . + {at: $at}] as $marks
+  | def sent($n; $list; $since): any($marks[]; .n == $n and .list == $list and .at > $since);
+  {untriaged: [.untriaged[].number | select(sent(.; "untriaged"; "") | not)],
+   stale: [$stale[] | select(sent(.number; "stale"; .since) | not) | {number, since}]} as $fresh
+  | {untriaged, stale: [$stale[] | {number, title, url, pr}],
+     new: {untriaged: $fresh.untriaged, stale: [$fresh.stale[].number]}, fresh: $fresh}' \
+  "$tmp/lists.json" > "$tmp/out.json" 2> /dev/null || die "comments not read: unexpected shape"
+
+send=false
+if [ "$mode" = scan ] && jq -e '(.new.untriaged | length) + (.new.stale | length) > 0' "$tmp/out.json" > /dev/null; then
+  # Asked only when there is something new: sf-state costs a read per ready issue. No request
+  # file: the foreman has already carried its requests out, so one written now would be lost.
+  FACTORY_T3_REQUESTS='' FACTORY_STATE_SUMMARY=$tmp/summary.json "$root/bin/sf-state" "$repo" > /dev/null \
+    || die "queue not read: sf-state failed"
+  if jq -es 'length == 1 and (.[0] | (.free | type == "number") and (.starts | type == "number"))' "$tmp/summary.json" > /dev/null 2>&1; then
+    ! jq -e '.starts == 0 and .free > 0' "$tmp/summary.json" > /dev/null || send=true
+  else
+    die "queue not read: sf-state wrote no summary"
+  fi
+fi
+
+jq -c '.fresh' "$tmp/out.json" > "$tmp/fresh.json" || die "batch not printed"
+key=$(tr -d '\r\n' < "$tmp/fresh.json" | cksum) || die "batch title not computed"
+jq -c --argjson send "$send" --arg title "$repo triage batch ${key%% *}" \
+  '{send: $send} + del(.fresh) + {title: $title}' "$tmp/out.json" || die "batch not printed"

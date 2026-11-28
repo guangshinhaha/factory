@@ -1111,3 +1111,14 @@ test_a_consult_marker_changes_no_action() {
   runs "[]"
   assert_eq '[{"action":"start","issue":7}]' "$(state)" "actions"
 }
+
+# The summary sf-triage reads: free slots after this fire's starts, and how many it starts.
+test_summary_reports_free_slots_and_starts() {
+  world
+  FACTORY_STATE_SUMMARY=$TEST_TMP/summary.json state > /dev/null || fail "sf-state failed"
+  assert_eq '{"free":2,"starts":0}' "$(tr -d '\r' < "$TEST_TMP/summary.json")" "empty queue"
+  issues "[$(ready_issue_json 7)]"
+  readied 7
+  FACTORY_STATE_SUMMARY=$TEST_TMP/summary.json state > /dev/null || fail "sf-state failed"
+  assert_eq '{"free":1,"starts":1}' "$(tr -d '\r' < "$TEST_TMP/summary.json")" "one start"
+}
