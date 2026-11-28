@@ -31,6 +31,9 @@
 # Otherwise a closed issue's live Run gets `advance` only, for a ready `debrief` or `lessons` task
 # (they run after the merge closed the issue), or a ready `ship` task (a fire died after the merge).
 #
+# FACTORY_STATE_SUMMARY=<file>, if set, also gets {"free":F,"starts":S}: slots left free after this
+# fire's actions, and the number of `start` actions. sf-triage reads it to tell an empty queue.
+#
 # Facts read: open issues (one `gh issue list`, never the search API), each ready issue's
 # timeline (the last `ready` label event, and factory marker comments after it), open PRs,
 # every worktree, and every Run whose objective is `factory <owner>/<repo>#<n>` with its task statuses, plus
@@ -485,8 +488,12 @@ def run_state:
       | select($prs[0] | map(.headRefName) | index($b) | not)
       | select(($open | index($n) | not) and ($live_objs | index("factory \($repo_lc)#\($n)") | not))
       | {action: "cleanup", issue: $n, worktree: .path}]) as $cleanups
-  | $run_actions + $stops + $holds + $starts + $cleanups | sort_by(.issue)
+  | ($run_actions + $stops + $holds + $starts + $cleanups | sort_by(.issue)),
+    {free: ($capacity - ($starts | length)), starts: ($starts | length)}
 ' > "$tmp/actions" 2> "$tmp/jq.err" \
   || die "actions not computed: $(sed 's/^jq: error[^:]*: //' "$tmp/jq.err")"
-IFS= read -r actions_line < "$tmp/actions" || :
+{ IFS= read -r actions_line || :; IFS= read -r summary_line || :; } < "$tmp/actions"
+if [ -n "${FACTORY_STATE_SUMMARY:-}" ]; then
+  printf '%s\n' "$summary_line" > "$FACTORY_STATE_SUMMARY" || die "summary not written to $FACTORY_STATE_SUMMARY"
+fi
 printf '%s\n' "$actions_line"
