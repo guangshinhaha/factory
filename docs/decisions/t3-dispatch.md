@@ -70,13 +70,15 @@ close the HTML comment early. All comments on the repo are read in one paginated
 | `dispatch` | `task`, `dispatch`, `agent`, `model`, `worktree` | `orch_worker_start` |
 | `status` | `task`, `status` (`completed`, `failed` or `ready`), `result`? | `orch_task_complete`, `_fail`, `_ready` |
 | `result` | `dispatch`, `outcome` (`succeeded`, or anything else to fail), `body` | the foreman |
-| `triage-sent` | `list` (`untriaged` or `stale`) | `sf-triage sent`, run by the foreman (#127) |
+| `triage-sent` | `untriaged`, `stale` (issue numbers; one comment per batch, on its first issue) | `sf-triage sent`, run by the foreman (#127) |
 
-**Triage batches.** Which issues the owner has been asked about is these markers, one per issue and
-list, not the thread list: `t3_thread_list` can't filter on archived threads, so a batch could come
-back after the owner archived it. So a batch goes out again only when an issue joins a list; a list
-that only shrinks sends nothing. A `stale` marker older than the issue's last `ready` label no longer
-counts.
+**Triage batches.** Which issues the owner has been asked about is these markers, not the thread
+list: `t3_thread_list` can't filter on archived threads, so a batch could come
+back after the owner archived it. So a batch goes out again only when an issue no marker has named
+joins a list; a list that only shrinks sends nothing, and neither does an issue that was sent as
+untriaged, got a label and lost it again. A `stale` marker older than the issue's last `ready` label
+or reopen no longer counts. A batch counts as sent once its thread exists: if that thread then fails,
+it shows as failed in T3, and `factory:triage` by hand lists the same issues.
 
 - **Ids.** A Run is `t3.<issue>.<UTC yyyymmddHHMMSS>`, a task `<run>.<k>`, a dispatch `<task>.d<k>`.
 - **Status** is folded in comment order, as in Orca. A task starts `pending` and becomes `ready`

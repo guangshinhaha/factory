@@ -3,17 +3,19 @@
 # writes is the record that a batch was sent. It never labels or edits an issue.
 # Usage: sf-triage owner/repo
 #          prints {"send":bool,"untriaged":[{number,title,url,trusted}],"stale":[{number,title,url,pr}],
-#          "new":{"untriaged":[N],"stale":[N]}}
+#          "new":{"untriaged":[N],"stale":[N]},"title":"owner/repo triage batch <key>"}
 #        sf-triage list owner/repo
 #          the same, without asking sf-state: send is always false and no thread snapshot is needed
 #        sf-triage sent owner/repo '<the "new" object>'
-#          posts a `triage-sent` marker comment on each of those issues
+#          posts one `triage-sent` marker comment naming them all (on the first), so it can't half-fail
 #
 # untriaged  open issues with none of ready, needs-shin, icebox, epic. trusted is false for an
 #            author who is not OWNER, MEMBER or COLLABORATOR: triage never reads that body.
 # stale      open `ready` issues with a PR from their branch (`<repo>-N` or `<repo>-N-*`, never a
-#            fork) merged since the last `ready` label.
-# new        the entries with no marker yet (a stale one: none since the last `ready` label).
+#            fork) merged since the last `ready` label or reopen.
+# new        the entries no marker names yet (a stale one: none since that label or reopen).
+# title      the batch thread's name: the same while `new` is the same, and different when an
+#            issue goes stale again, so an old batch's thread is never taken for this one's.
 # send       new is not empty, the factory has a free slot and sf-state starts nothing.
 #
 # State is those markers on GitHub: a batch is sent again only when an issue joins a list.
@@ -45,19 +47,21 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/sf-triage.XXXXXX") || die "temp dir not created
 trap 'rm -rf "$tmp"' EXIT
 
 if [ "$mode" = sent ]; then
-  # "<list> <number>" lines, only from exactly two arrays of whole numbers.
+  # Two lines, the host issue and the marker, only from exactly two arrays of whole numbers.
   printf '%s' "$2" | jq -rs '
     def nums: type == "array" and all(.[]; type == "number" and . == floor and . >= 1 and . <= 9007199254740991);
     if length == 1 and (.[0] | type == "object" and keys == ["stale","untriaged"] and (.untriaged | nums) and (.stale | nums))
-    then .[0] | (.untriaged[] | "untriaged \(.)"), (.stale[] | "stale \(.)")
+    then .[0] | select((.untriaged + .stale | length) > 0)
+      | "\((.untriaged + .stale)[0])", ({kind: "triage-sent", untriaged, stale} | tojson)
     else error("shape") end' > "$tmp/sent" 2> /dev/null \
     || usage_error "not a {\"untriaged\":[N],\"stale\":[N]} object: [$2]"
-  while read -r list n; do
-    n=${n%"$cr"}
-    printf 'factory: sent to you for triage.\n\n<!-- factory:{"kind":"triage-sent","list":"%s"} -->\n' "$list" \
-      | gh issue comment "$n" -R "$repo" --body-file - > /dev/null \
-      || die "triage-sent marker not posted on #$n"
-  done < "$tmp/sent"
+  n='' marker=''
+  { IFS= read -r n && IFS= read -r marker; } < "$tmp/sent" || :
+  if [ -n "$n" ]; then
+    printf 'factory: sent to you for triage.\n\n<!-- factory:%s -->\n' "${marker%"$cr"}" \
+      | gh issue comment "${n%"$cr"}" -R "$repo" --body-file - > /dev/null \
+      || die "triage-sent marker not posted on #${n%"$cr"}"
+  fi
   exit 0
 fi
 
@@ -104,8 +108,10 @@ while read -r n; do
   # UTC ISO-8601 from one source, so the strings order as the times do.
   jq -c --argjson n "$n" --slurpfile t "$tmp/timeline.json" '
     .candidates[] | select(.number == $n)
-    | ([$t[0][] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max) as $since
-    | if $since == null then error("no ready event") else . end
+    | ([$t[0][] | select(.event == "labeled" and .label.name == "ready") | .created_at] | max) as $readied
+    | if $readied == null then error("no ready event") else . end
+    # A reopen starts afresh, as sf-state counts it.
+    | ([$readied, ($t[0][] | select(.event == "reopened") | .created_at)] | max) as $since
     | select(.merged_at > $since) | {number, title, url, pr, since: $since}' "$tmp/lists.json" >> "$tmp/stale.jsonl" 2> /dev/null \
     || die "timeline of #$n has no ready label event"
 done < "$tmp/candidates"
@@ -118,14 +124,17 @@ jq -c --slurpfile stale "$tmp/stale.jsonl" --slurpfile comments "$tmp/comments.j
   # As sf-state reads markers: people with write access only, last non-empty line only.
   [$comments[0][]
     | select(.author_association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a))
-    | (.issue_url | split("/") | last | tonumber) as $n | .created_at as $at
+    | .created_at as $at
     | (.body // "" | split("\n") | map(rtrimstr("\r") | select(test("\\S"))) | last // "")
     | scan("^<!-- factory:(\\{.*\\}) -->$") | .[0] | (try fromjson catch empty)
-    | select(.kind == "triage-sent") | {n: $n, list, at: $at}] as $marks
+    | select(type == "object" and .kind == "triage-sent")
+    | ((.untriaged | arrays | .[] | {n: ., list: "untriaged"}), (.stale | arrays | .[] | {n: ., list: "stale"}))
+    | . + {at: $at}] as $marks
   | def sent($n; $list; $since): any($marks[]; .n == $n and .list == $list and .at > $since);
-  {untriaged, stale: [$stale[] | {number, title, url, pr}],
-   new: {untriaged: [.untriaged[].number | select(sent(.; "untriaged"; "") | not)],
-         stale: [$stale[] | select(sent(.number; "stale"; .since) | not) | .number]}}' \
+  {untriaged: [.untriaged[].number | select(sent(.; "untriaged"; "") | not)],
+   stale: [$stale[] | select(sent(.number; "stale"; .since) | not) | {number, since}]} as $fresh
+  | {untriaged, stale: [$stale[] | {number, title, url, pr}],
+     new: {untriaged: $fresh.untriaged, stale: [$fresh.stale[].number]}, fresh: $fresh}' \
   "$tmp/lists.json" > "$tmp/out.json" 2> /dev/null || die "comments not read: unexpected shape"
 
 send=false
@@ -141,4 +150,7 @@ if [ "$mode" = scan ] && jq -e '(.new.untriaged | length) + (.new.stale | length
   fi
 fi
 
-jq -c --argjson send "$send" '{send: $send} + .' "$tmp/out.json" || die "batch not printed"
+jq -c '.fresh' "$tmp/out.json" > "$tmp/fresh.json" || die "batch not printed"
+key=$(tr -d '\r\n' < "$tmp/fresh.json" | cksum) || die "batch title not computed"
+jq -c --argjson send "$send" --arg title "$repo triage batch ${key%% *}" \
+  '{send: $send} + del(.fresh) + {title: $title}' "$tmp/out.json" || die "batch not printed"

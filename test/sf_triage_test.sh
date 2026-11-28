@@ -45,8 +45,8 @@ merged_pr() { printf '{"number":%s,"headRefName":"%s","mergedAt":"%s","isCrossRe
 readied() { timeline "$1" "[{\"event\":\"labeled\",\"label\":{\"name\":\"ready\"},\"created_at\":\"$2\"}]"; }
 # sent <issue> <list> [association] [created_at]
 sent() {
-  printf '{"issue_url":"https://api.github.com/repos/%s/issues/%s","author_association":"%s","created_at":"%s","body":"factory: sent to you for triage.\\n\\n<!-- factory:{\\"kind\\":\\"triage-sent\\",\\"list\\":\\"%s\\"} -->"}' \
-    "$REPO" "$1" "${3:-OWNER}" "${4:-2026-11-20T00:00:00Z}" "$2"
+  printf '{"author_association":"%s","created_at":"%s","body":"factory: sent to you for triage.\\n\\n<!-- factory:{\\"kind\\":\\"triage-sent\\",\\"%s\\":[%s]} -->"}' \
+    "${3:-OWNER}" "${4:-2026-11-20T00:00:00Z}" "$2" "$1"
 }
 
 triage() { sh "$TEST_TMP/plugin/bin/sf-triage" "$@"; }
@@ -205,16 +205,50 @@ test_a_failed_sf_state_sends_nothing() {
   assert_eq '' "$out" stdout
 }
 
-test_sent_posts_one_marker_per_issue() {
+test_sent_records_the_whole_batch_in_one_comment() {
   world
   printf '' | fixture gh issue comment 7 -R "$REPO" --body-file -
-  printf '' | fixture gh issue comment 9 -R "$REPO" --body-file -
-  triage sent "$REPO" '{"untriaged":[7],"stale":[9]}' || fail "sent failed"
+  triage sent "$REPO" '{"untriaged":[7,8],"stale":[9]}' || fail "sent failed"
+  assert_eq 1 "$(count_calls 'gh issue comment')" "comments"
   assert_called "gh issue comment 7 -R $REPO --body-file -"
-  assert_called "gh issue comment 9 -R $REPO --body-file -"
-  assert_contains "$(fake_stdin)" '<!-- factory:{"kind":"triage-sent","list":"untriaged"} -->'
-  assert_contains "$(fake_stdin)" '<!-- factory:{"kind":"triage-sent","list":"stale"} -->'
+  assert_contains "$(fake_stdin)" '<!-- factory:{"kind":"triage-sent","untriaged":[7,8],"stale":[9]} -->'
   assert_eq 0 "$(count_calls 'gh issue edit')" "issue edits"
+}
+
+test_sent_with_nothing_new_posts_nothing() {
+  world
+  triage sent "$REPO" '{"untriaged":[],"stale":[]}' || fail "sent failed"
+  assert_eq 0 "$(count_calls 'gh issue comment')" "comments"
+}
+
+test_one_marker_naming_the_batch_silences_every_issue_in_it() {
+  world
+  open_issues "[$(issue 7),$(issue 9)]"
+  comments '[{"author_association":"OWNER","created_at":"2026-11-20T00:00:00Z","body":"<!-- factory:{\"kind\":\"triage-sent\",\"untriaged\":[7,9],\"stale\":[]} -->"},{"author_association":"OWNER","created_at":"2026-11-20T00:00:00Z","body":"<!-- factory:7 -->"},{"author_association":"OWNER","created_at":"2026-11-20T00:00:00Z","body":"<!-- factory:{\"kind\":\"triage-sent\",\"untriaged\":\"x\"} -->"}]'
+  out=$(triage "$REPO") || fail "sf-triage failed"
+  assert_eq false "$(field .send "$out")" send
+}
+
+test_the_title_holds_for_the_same_new_set_and_changes_when_an_issue_goes_stale_again() {
+  world
+  open_issues "[$(issue 7 ready)]"
+  merged "[$(merged_pr 12 app-7 2026-11-10T00:00:00Z)]"
+  readied 7 2026-11-01T00:00:00Z
+  first=$(field .title "$(triage "$REPO")")
+  assert_contains "$first" "\"$REPO triage batch "
+  assert_eq "$first" "$(field .title "$(triage "$REPO")")" "same set"
+  merged "[$(merged_pr 15 app-7 2026-11-25T00:00:00Z)]"
+  readied 7 2026-11-22T00:00:00Z
+  [ "$first" != "$(field .title "$(triage "$REPO")")" ] || fail "title reused after a re-ready: $first"
+}
+
+test_a_pr_merged_before_a_reopen_is_not_stale() {
+  world
+  open_issues "[$(issue 7 ready)]"
+  merged "[$(merged_pr 12 app-7 2026-11-10T00:00:00Z)]"
+  timeline 7 '[{"event":"labeled","label":{"name":"ready"},"created_at":"2026-11-01T00:00:00Z"},{"event":"reopened","created_at":"2026-11-11T00:00:00Z"}]'
+  out=$(triage "$REPO") || fail "sf-triage failed"
+  assert_eq '[]' "$(field .stale "$out")" stale
 }
 
 test_sent_refuses_anything_but_issue_numbers() {
